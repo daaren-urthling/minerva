@@ -9,6 +9,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from pprint import pprint
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -202,10 +203,16 @@ class OllamaModelClient:
     def complete(self, prompt, max_new_tokens):
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            # stream = true give a response splitted in parts, but also returns non-existing tools call
+            # useful for diagnostic
+            "stream": True,
+            "think": True,
             "options": {
                 "num_predict": max_new_tokens,
                 "temperature": self.temperature,
@@ -213,14 +220,36 @@ class OllamaModelClient:
             },
         }
         request = urllib.request.Request(
-            self.host + "/api/generate",
+            self.host + "/api/chat",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         try:
+            thinking_parts = []
+            response_parts = []
+            tool_calls = []
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                for line in response:
+                        if not line.strip():
+                            continue
+
+                        data = json.loads(line.decode("utf-8"))
+
+                        if data.get("error"):
+                            raise RuntimeError(f"Ollama error: {data['error']}")
+
+                        message = data.get("message", {})
+
+                        if message.get("thinking"):
+                            thinking_parts.append(message["thinking"])
+
+                        if message.get("content"):
+                            response_parts.append(message["content"])
+
+                        if message.get("tool_calls"):
+                            tool_calls.extend(message["tool_calls"])
+
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
@@ -232,9 +261,9 @@ class OllamaModelClient:
                 f"Model: {self.model}"
             ) from exc
 
-        if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
+        content = "".join(response_parts)
+        thinking = "".join(thinking_parts)
+        return content, thinking, tool_calls
 
 
 class MinervaAgent:
@@ -473,7 +502,7 @@ class MinervaAgent:
 
         while tool_steps < self.max_steps and attempts < max_attempts:
             attempts += 1
-            raw = self.model_client.complete(self.prompt(user_message), self.max_new_tokens)
+            raw, thinking, tools = self.model_client.complete(self.prompt(user_message), self.max_new_tokens)
             kind, payload = self.parse(raw)
 
             if kind == "tool":
@@ -488,17 +517,19 @@ class MinervaAgent:
                         "args": args,
                         "content": result,
                         "created_at": now(),
+                        "thinking" : thinking,
+                        "tools": tools
                     }
                 )
                 self.note_tool(name, args, result)
                 continue
 
             if kind == "retry":
-                self.record({"role": "assistant", "content": payload, "created_at": now()})
+                self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "tools": tools})
                 continue
 
             final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now()})
+            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "tools": tools})
             self.remember(memory["notes"], clip(final, 220), 5)
             return final
 
@@ -506,7 +537,7 @@ class MinervaAgent:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
         else:
             final = "Stopped after reaching the step limit without a final answer."
-        self.record({"role": "assistant", "content": final, "created_at": now()})
+        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "tools": tools})
         return final
 
     #############################################################
@@ -1021,6 +1052,10 @@ def main(argv=None):
             continue
         if user_input == "/session":
             print(agent.session_path)
+            continue
+        if user_input == "/thinking":
+            print(agent.session["history"][-1]["thinking"])
+            pprint(agent.session["history"][-1]["tools"])
             continue
         if user_input == "/reset":
             agent.reset()
