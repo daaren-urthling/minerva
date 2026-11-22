@@ -468,7 +468,10 @@ class MinervaAgent:
         path = args.get("path")
         if name in {"read_file", "write_file", "patch_file"} and path:
             self.remember(memory["files"], str(path), 8)
-        note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
+        # TODO tool results where truncated: it make sense for file content, but not really for ERP queries
+        # however, a stategy for dealing with big batches of returned data should be found
+        # note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
+        note = f"{name}: {clip(str(result).replace(chr(10), ' '))}"
         self.remember(memory["notes"], note, 5)
 
     def ask(self, user_message):

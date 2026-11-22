@@ -5,12 +5,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "north-mini",
+            "name": "qwen3:8b",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--model", "\"north-mini\"" ]
+            "args": ["--model", "\"qwen3:8b\"" ]
         },
         {
             "name": "qwen3.5",
@@ -19,6 +19,14 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [ ]
+        },
+        {
+            "name": "north-mini",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["--model", "\"north-mini\"" ]
         }
     ]
 }
