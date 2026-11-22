@@ -14,7 +14,7 @@ from pprint import pprint
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-HELP_TEXT = "/help, /memory, /session, /reset, /exit"
+HELP_TEXT = "/help, /memory, /session, /thinking, /reset, /exit"
 WELCOME_ART = (
 "            .:;++++++;;:.",
 "        :;+++++++;:  .:;+++;.",
@@ -41,11 +41,12 @@ WELCOME_ART = (
 HELP_DETAILS = "\n".join(
     [
         "Commands:",
-        "/help    Show this help message.",
-        "/memory  Show the agent's distilled working memory.",
-        "/session Show the path to the saved session file.",
-        "/reset   Clear the current session history and memory.",
-        "/exit    Exit the agent.",
+        "/help     Show this help message.",
+        "/memory   Show the agent's distilled working memory.",
+        "/session  Show the path to the saved session file.",
+        "/thinking Shown the last thinking text, and any mismatched tool calls"
+        "/reset    Clear the current session history and memory.",
+        "/exit     Exit the agent.",
     ]
 )
 MAX_TOOL_OUTPUT = 4000
@@ -326,41 +327,36 @@ class MinervaAgent:
     ###############################################
     def build_tools(self):
         tools = {
-            "LIST_FILES": {
-                "schema": {"path": "str"},
+            "CUSTOMER_INFO": {
+                "schema": {"customer_code": "str"},
                 "risky": False,
-                "description": "List files in the workspace.",
-                "run": self.tool_list_files,
+                "description": "Returns: company_name, address, telephone and other company info",
+                "run": self.customer_info,
             },
-            "READ_FILE": {
-                "schema": {"path": "str", "start": "int=1", "end": "int=200"},
+
+            "SEARCH_PEOPLE": {
+                "schema": {"name": "str", "last_name": "str"},
                 "risky": False,
-                "description": "Read a UTF-8 file by line range.",
-                "run": self.tool_read_file,
+                "description": "Returns:customer_code or empty result when not found",
+                "run": self.search_people,
             },
-            "SEARCH": {
-                "schema": {"pattern": "str", "path": "str='.'"},
+            "ITEM_INFO": {
+                "schema": {"item_code": "str"},
                 "risky": False,
-                "description": "Search the workspace with rg or a simple fallback.",
-                "run": self.tool_search,
+                "description": "Returns item information: description, price, etc.",
+                "run": self.item_info,
             },
-            "RUN_SHELL": {
-                "schema": {"command": "str", "timeout": "int=20"},
-                "risky": True,
-                "description": "Run a shell command in the repo root.",
-                "run": self.tool_run_shell,
+            "SEARCH_ITEM": {
+                "schema": {"description": "str"},
+                "risky": False,
+                "description": "Returns item code or empty result when not found. Wildcards are allowed.",
+                "run": self.search_item,
             },
-            "WRITE_FILE": {
-                "schema": {"path": "str", "content": "str"},
-                "risky": True,
-                "description": "Write a text file.",
-                "run": self.tool_write_file,
-            },
-            "PATCH_FILE": {
-                "schema": {"path": "str", "old_text": "str", "new_text": "str"},
-                "risky": True,
-                "description": "Replace one exact text block in a file.",
-                "run": self.tool_patch_file,
+            "STOCK_LEVEL": {
+                "schema": {"item_code": "str"},
+                "risky": False,
+                "description": "Returns the current stock level of the item, and the unit of measure it is expressed: pieces, boxes, etc.",
+                "run": self.item_stock_level,
             },
         }
         if self.depth < self.max_depth:
@@ -372,54 +368,32 @@ class MinervaAgent:
             }
         return tools
 
+    def base_path(self):
+        return Path(__file__).resolve().parent
+
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
     ############################################
     def build_prefix(self):
+        
+        rules = Path(self.base_path(), "assets", "system_prompt.md").read_text(encoding="utf-8")
+
         tool_lines = []
         for name, tool in self.tools.items():
             fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
             risk = "approval required" if tool["risky"] else "safe"
             tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
-        examples = "\n".join(
-            [
-                '<tool>{"name":"LIST_FILES","args":{"path":"."}}</tool>',
-                '<tool>{"name":"READ_FILE","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool name="WRITE_FILE" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="PATCH_FILE" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"RUN_SHELL","args":{"command":"python -m pytest -q","timeout":30}}</tool>',
-                "<final>Done.</final>",
-            ]
-        )
-        rules = "\n".join([
-            "- Use commands instead of guessing about the workspace.",
-            "- Return exactly one <tool>...</tool> or one <final>...</final>.",
-            "- command messages must look like:",
-            '  <tool>{"name":"command_name","args":{...}}</tool>',
-            "- For WRITE_FILE and PATCH_FILE with multi-line text, prefer XML style:",
-            '  <tool name="WRITE_FILE" path="file.py"><content>...</content></tool>',
-            "- Final answers must look like:",
-            "  <final>your answer</final>",
-            "- Never invent command results.",
-            "- Keep answers concise and concrete.",
-            "- If the user asks you to create or update a specific file and the path is clear, use WRITE_FILE or PATCH_FILE instead of repeatedly listing files.",
-            "- Before writing tests for existing code, read the implementation first.",
-            "- When writing tests, match the current implementation unless the user explicitly asked you to change the code.",
-            "- New files should be complete and runnable, including obvious imports.",
-            "- Do not repeat the same command message with the same arguments if it did not help. Choose a different command or return a final answer.",
-            "- Required command arguments must not be empty. Do not call READ_FILE, WRITE_FILE, PATCH_FILE, RUN_SHELL, or DELEGATE with args={}.",
-            "- You cannot execute commands or functions.",
-            "- Your only task is to generate text for another program to parse.",
-            "- Do not use native function calling.",
-            "- Do not execute anything."
-        ])
+
+        examples = Path(self.base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
+
+        subscription_info = Path(self.base_path(), "assets", "subscription_info.md").read_text(encoding="utf-8")
+
         return "\n\n".join([
-            "You are Minerva, the AI agent of the Mago ERP running through Ollama.",
-            "Rules:\n" + rules,
-            "AVAILABLE COMMAND MESSAGES:\n" + tool_text,
-            "Valid response examples:\n" + examples,
-            self.workspace.text(),
+            rules,
+            "**AVAILABLE SERVICE REQUESTS**:\n" + tool_text,
+            examples,
+            subscription_info
         ])
 
     def memory_text(self):
@@ -559,7 +533,7 @@ class MinervaAgent:
         try:
             self.validate_tool(name, args)
         except Exception as exc:
-            example = self.tool_example(name)
+            example = Path(self.base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
             message = f"error: invalid arguments for {name}: {exc}"
             if example:
                 message += f"\nexample: {example}"
@@ -579,18 +553,6 @@ class MinervaAgent:
             return False
         recent = tool_events[-2:]
         return all(item["name"] == name and item["args"] == args for item in recent)
-
-    def tool_example(self, name):
-        examples = {
-            "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-            "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-            "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-            "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-            "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-            "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-            "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
-        }
-        return examples.get(name, "")
 
     def validate_tool(self, name, args):
         args = args or {}
@@ -674,26 +636,26 @@ class MinervaAgent:
     @staticmethod
     def parse(raw):
         raw = str(raw)
-        if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            body = MinervaAgent.extract(raw, "tool")
+        if "<service>" in raw and ("<final>" not in raw or raw.find("<service>") < raw.find("<final>")):
+            body = MinervaAgent.extract(raw, "service")
             try:
                 payload = json.loads(body)
             except Exception:
-                return "retry", MinervaAgent.retry_notice("model returned malformed tool JSON")
+                return "retry", MinervaAgent.retry_notice("model returned malformed service JSON")
             if not isinstance(payload, dict):
-                return "retry", MinervaAgent.retry_notice("tool payload must be a JSON object")
+                return "retry", MinervaAgent.retry_notice("service payload must be a JSON object")
             if not str(payload.get("name", "")).strip():
-                return "retry", MinervaAgent.retry_notice("tool payload is missing a tool name")
+                return "retry", MinervaAgent.retry_notice("service payload is missing a service name")
             args = payload.get("args", {})
             if args is None:
                 payload["args"] = {}
             elif not isinstance(args, dict):
                 return "retry", MinervaAgent.retry_notice()
             return "tool", payload
-        if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
+        if "<service" in raw and ("<final>" not in raw or raw.find("<service") < raw.find("<final>")):
             payload = MinervaAgent.parse_xml_tool(raw)
             if payload is not None:
-                return "tool", payload
+                return "service", payload
             return "retry", MinervaAgent.retry_notice()
         if "<final>" in raw:
             final = MinervaAgent.extract(raw, "final").strip()
@@ -711,15 +673,14 @@ class MinervaAgent:
         if problem:
             prefix += f": {problem}"
         else:
-            prefix += ": model returned malformed tool output"
+            prefix += ": model returned malformed service output"
         return (
-            f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
-            'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
+            f"{prefix}. Reply with a valid <service> call or a non-empty <final> answer."
         )
 
     @staticmethod
     def parse_xml_tool(raw):
-        match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
+        match = re.search(r"<service(?P<attrs>[^>]*)>(?P<body>.*?)</service>", raw, re.S)
         if not match:
             return None
         attrs = MinervaAgent.parse_attrs(match.group("attrs"))
@@ -797,6 +758,34 @@ class MinervaAgent:
         if not self.path_is_within_root(resolved):
             raise ValueError(f"path escapes workspace: {raw_path}")
         return resolved
+
+    def customer_info(self, args):
+        return json.dumps({
+            "customer_code": "0042",
+            "company_name": "ACME ltd",
+            "tax_id_number": "02572020101",
+            "telephone1": "040 5657746",
+            "telephone2": "040 6657288",
+            "telex": "123-acme-7756",
+            "fax": "040 6577466",
+            "internet": "www.acmeglobal.com",
+            "e_mail": "sales@acmeglobal.com",
+        })
+
+    def search_people(self, args):
+        return json.dumps({
+            "customer_code": "0042",
+            "working_position": "owner",
+        })
+
+    def item_info(self, args):
+        return
+
+    def search_item(self, args):
+        return
+
+    def item_stock_level(self, args):
+        return
 
     def tool_list_files(self, args):
         path = self.path(args.get("path", "."))
@@ -1064,7 +1053,7 @@ def main(argv=None):
             continue
         if user_input == "/thinking":
             print(agent.session["history"][-1]["thinking"])
-            pprint(agent.session["history"][-1]["tools"])
+            pprint(agent.session["history"][-1]["mismatched_tools"])
             continue
         if user_input == "/reset":
             agent.reset()
