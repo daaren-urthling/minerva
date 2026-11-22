@@ -7,6 +7,7 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
@@ -228,7 +229,7 @@ class OllamaModelClient:
         try:
             thinking_parts = []
             response_parts = []
-            tool_calls = []
+            mismatched_tool_calls = []
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 for line in response:
                         if not line.strip():
@@ -248,7 +249,7 @@ class OllamaModelClient:
                             response_parts.append(message["content"])
 
                         if message.get("tool_calls"):
-                            tool_calls.extend(message["tool_calls"])
+                            mismatched_tool_calls.extend(message["tool_calls"])
 
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -263,7 +264,7 @@ class OllamaModelClient:
 
         content = "".join(response_parts)
         thinking = "".join(thinking_parts)
-        return content, thinking, tool_calls
+        return content, thinking, mismatched_tool_calls
 
 
 class MinervaAgent:
@@ -475,6 +476,12 @@ class MinervaAgent:
             "Current user request:\n" + user_message,
         ])
 
+    def log(self, num, message):
+        logfile = os.path.join(self.session_store.root, self.session["id"] + "-prompt.log")
+        with open(logfile, "a", encoding="utf-8") as log:
+            print("============================ ", num, file=log)
+            pprint(message, stream=log)
+
     ###############################################
     #### 5) Session Memory (Continued) ###########
     ###############################################
@@ -502,7 +509,9 @@ class MinervaAgent:
 
         while tool_steps < self.max_steps and attempts < max_attempts:
             attempts += 1
-            raw, thinking, tools = self.model_client.complete(self.prompt(user_message), self.max_new_tokens)
+            prompt = self.prompt(user_message)
+            self.log(attempts, prompt)
+            raw, thinking, mismatched_tools = self.model_client.complete(prompt, self.max_new_tokens)
             kind, payload = self.parse(raw)
 
             if kind == "tool":
@@ -518,18 +527,18 @@ class MinervaAgent:
                         "content": result,
                         "created_at": now(),
                         "thinking" : thinking,
-                        "tools": tools
+                        "mismatched_tools": mismatched_tools
                     }
                 )
                 self.note_tool(name, args, result)
                 continue
 
             if kind == "retry":
-                self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "tools": tools})
+                self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
                 continue
 
             final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "tools": tools})
+            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
             self.remember(memory["notes"], clip(final, 220), 5)
             return final
 
@@ -537,7 +546,7 @@ class MinervaAgent:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
         else:
             final = "Stopped after reaching the step limit without a final answer."
-        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "tools": tools})
+        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
         return final
 
     #############################################################
@@ -1007,7 +1016,7 @@ def build_arg_parser():
         "--approval",
         choices=("ask", "auto", "never"),
         default="ask",
-        help="Approval policy for risky tools; auto grants the model arbitrary command execution and file writes.",
+        help="Approval policy for risky tools; auto grants the model arbitrary process execution and data modification.",
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
