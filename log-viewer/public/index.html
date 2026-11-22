@@ -1,7 +1,57 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Minerva Log Viewer</title><link rel="stylesheet" href="/style.css"></head><body><div class="app"><header><h1>Minerva Session Log</h1></header><details class="meta selector" id="sessionSelector">
-<summary><span class="label">Sessione</span> <strong id="currentSessionName">Nessuna sessione</strong></summary>
-<div class="selectorBody">
-<div><div class="label">Directory sessioni</div><div class="pathrow"><input id="dirPath" type="text"><button id="setDir">Imposta</button></div><div class="label">Default: ..\.minerva\sessions rispetto alla directory del progetto viewer.</div></div>
-<div><div class="label">Sessione</div><div class="pathrow"><select id="sessions"><option value="">Nessuna sessione</option></select><button id="refreshSessions">Aggiorna elenco</button></div></div>
-</div>
-</details><div class="actions controls"><button id="reload">Ricarica</button><button id="bottom">Vai in fondo</button><label><input id="auto" type="checkbox"> Auto refresh</label><select id="interval"><option value="1000">1 s</option><option value="2000" selected>2 s</option><option value="5000">5 s</option></select></div><div id="status" class="status">Caricamento...</div><section id="meta" class="meta" hidden></section><main id="chat" class="chat"><div class="empty">Selezionare una sessione.</div></main><section id="memory" class="memory" hidden><h2>Memory</h2><div id="memoryBody"></div></section></div><script src="/viewer.js"></script></body></html>
+<!doctype html>
+<html lang="it">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Minerva Log Viewer</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    <div class="app">
+        <header class="mainHeader">
+            <h1>Minerva Session Log</h1>
+            <img
+                    class="minervaLogo"
+                    src="/minerva-logo.png"
+                    alt="Minerva"
+                >        
+        </header>
+        <details class="meta selector" id="sessionSelector">
+            <summary><span class="label">Sessione</span> <strong id="currentSessionName">Nessuna sessione</strong>
+            </summary>
+            <div class="selectorBody">
+                <div>
+                    <div class="label">Directory sessioni</div>
+                    <div class="pathrow"><input id="dirPath" type="text"><button id="setDir">Imposta</button></div>
+                    <div class="label">Default: ..\.minerva\sessions rispetto alla directory del progetto viewer.</div>
+                </div>
+                <div>
+                    <div class="label">Sessione</div>
+                    <div class="pathrow"><select id="sessions">
+                            <option value="">Nessuna sessione</option>
+                        </select><button id="refreshSessions">Aggiorna elenco</button></div>
+                </div>
+            </div>
+        </details>
+        <div class="actions controls"><button id="reload">Ricarica</button><button id="bottom">Vai in
+                fondo</button><label><input id="auto" type="checkbox"> Auto refresh</label><select id="interval">
+                <option value="1000">1 s</option>
+                <option value="2000" selected>2 s</option>
+                <option value="5000">5 s</option>
+            </select></div>
+        <div id="status" class="status">Caricamento...</div>
+        <section id="meta" class="meta" hidden></section>
+        <main id="chat" class="chat">
+            <div class="empty">Selezionare una sessione.</div>
+        </main>
+        <section id="memory" class="memory" hidden>
+            <h2>Memory</h2>
+            <div id="memoryBody"></div>
+        </section>
+    </div>
+    <script src="/viewer.js"></script>
+</body>
+
+</html>
