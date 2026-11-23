@@ -61,7 +61,7 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 ##############################
 #### Six Agent Components ####
 ##############################
-# 1) Live Repo Context -> WorkspaceContext
+# 1) User Data Context -> SubscriptionContext
 # 2) Prompt Shape And Cache Reuse -> build_prefix, memory_text, prompt
 # 3) Structured Tools, Validation, And Permissions -> build_tools, run_tool, validate_tool, approve, parse, path, tool_*
 # 4) Context Reduction And Output Management -> clip, history_text
@@ -72,6 +72,8 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 def now():
     return datetime.now(timezone.utc).isoformat()
 
+def base_path():
+    return Path(__file__).resolve().parent
 
 # Supporting helper for component 4 (context reduction and output management).
 def clip(text, limit=MAX_TOOL_OUTPUT):
@@ -91,77 +93,19 @@ def middle(text, limit):
     right = limit - 3 - left
     return text[:left] + "..." + text[-right:]
 
-
-##############################
-#### 1) Live Repo Context ####
-##############################
-class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
-        self.cwd = cwd
-        self.repo_root = repo_root
-        self.branch = branch
-        self.default_branch = default_branch
-        self.status = status
-        self.recent_commits = recent_commits
-        self.project_docs = project_docs
+##################################
+#### 1) User Data Context ####
+##################################
+class SubscriptionContext:
+    def __init__(self, name):
+        self.name = name;
 
     @classmethod
-    def build(cls, cwd):
-        cwd = Path(cwd).resolve()
-
-        def git(args, fallback=""):
-            try:
-                result = subprocess.run(
-                    ["git", *args],
-                    cwd=cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=5,
-                )
-                return result.stdout.strip() or fallback
-            except Exception:
-                return fallback
-
-        repo_root = Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
-        docs = {}
-        for base in (repo_root, cwd):
-            for name in DOC_NAMES:
-                path = base / name
-                if not path.exists():
-                    continue
-                key = str(path.relative_to(repo_root))
-                if key in docs:
-                    continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
-
-        return cls(
-            cwd=str(cwd),
-            repo_root=str(repo_root),
-            branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main").removeprefix("origin/"),
-            status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
-            project_docs=docs,
-        )
+    def build(cls, name):
+        return cls(name)
 
     def text(self):
-        commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
-        docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
-        return "\n".join([
-            "Workspace:",
-            f"- cwd: {self.cwd}",
-            f"- repo_root: {self.repo_root}",
-            f"- branch: {self.branch}",
-            f"- default_branch: {self.default_branch}",
-            "- status:",
-            self.status,
-            "- recent_commits:",
-            commits,
-            "- project_docs:",
-            docs,
-        ])
-
+        return self.name
 
 ##############################
 #### 5) Session Memory #######
@@ -197,7 +141,6 @@ class FakeModelClient:
         if not self.outputs:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
-
 
 class OllamaModelClient:
     def __init__(self, model, host, temperature, top_p, timeout):
@@ -407,7 +350,7 @@ class MinervaAgent:
     def __init__(
         self,
         model_client,
-        workspace,
+        subscription,
         session_store,
         session=None,
         approval_policy="ask",
@@ -418,8 +361,8 @@ class MinervaAgent:
         read_only=False,
     ):
         self.model_client = model_client
-        self.workspace = workspace
-        self.root = Path(workspace.repo_root)
+        self.subscription = subscription
+        self.root = base_path()
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -430,7 +373,7 @@ class MinervaAgent:
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
-            "workspace_root": workspace.repo_root,
+            "subscription": subscription.name,
             "history": [],
             "memory": {"task": "", "files": [], "notes": []},
         }
@@ -439,10 +382,10 @@ class MinervaAgent:
         self.session_path = self.session_store.save(self.session)
 
     @classmethod
-    def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
+    def from_session(cls, model_client, subscription, session_store, session_id, **kwargs):
         return cls(
             model_client=model_client,
-            workspace=workspace,
+            subscription=subscription,
             session_store=session_store,
             session=session_store.load(session_id),
             **kwargs,
@@ -503,15 +446,12 @@ class MinervaAgent:
             }
         return tools
 
-    def base_path(self):
-        return Path(__file__).resolve().parent
-
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
     ############################################
     def build_prefix(self):
         
-        rules = Path(self.base_path(), "assets", "system_prompt.md").read_text(encoding="utf-8")
+        rules = Path(base_path(), "assets", "system_prompt.md").read_text(encoding="utf-8")
 
         tool_lines = []
         for name, tool in self.tools.items():
@@ -520,9 +460,9 @@ class MinervaAgent:
             tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
 
-        examples = Path(self.base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
+        examples = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
 
-        subscription_info = Path(self.base_path(), "assets", "subscription_info.md").read_text(encoding="utf-8")
+        subscription_info = Path(base_path(), "assets", "subscription_info.md").read_text(encoding="utf-8")
 
         return "\n\n".join([
             rules,
@@ -671,7 +611,7 @@ class MinervaAgent:
         try:
             self.validate_tool(name, args)
         except Exception as exc:
-            example = Path(self.base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
+            example = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
             message = f"error: invalid arguments for {name}: {exc}"
             if example:
                 message += f"\nexample: {example}"
@@ -854,7 +794,7 @@ class MinervaAgent:
             raise ValueError("task must not be empty")
         child = MinervaAgent(
             model_client=self.model_client,
-            workspace=self.workspace,
+            subscription=self.subscription,
             session_store=self.session_store,
             approval_policy="never",
             max_steps=int(args.get("max_steps", 3)),
@@ -902,8 +842,7 @@ def build_welcome(agent, model, host):
             center("M I N E R V A"),
             divider("-"),
             row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
+            pair("MODEL", model, "SUBSCRIPTION", agent.subscription.name),
             pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
             row(""),
         ]
@@ -911,8 +850,8 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 def build_agent(args):
-    workspace = WorkspaceContext.build(args.cwd)
-    store = SessionStore(Path(workspace.repo_root) / ".minerva" / "sessions")
+    subscription = SubscriptionContext.build(args.subscription)
+    store = SessionStore(base_path() / ".minerva" / "sessions")
     if (args.provider == "Ollama"):
         model = OllamaModelClient(
             model=args.model,
@@ -937,7 +876,7 @@ def build_agent(args):
     if session_id:
         return MinervaAgent.from_session(
             model_client=model,
-            workspace=workspace,
+            subscription=subscription,
             session_store=store,
             session_id=session_id,
             approval_policy=args.approval,
@@ -946,7 +885,7 @@ def build_agent(args):
         )
     return MinervaAgent(
         model_client=model,
-        workspace=workspace,
+        subscription=subscription,
         session_store=store,
         approval_policy=args.approval,
         max_steps=args.max_steps,
@@ -960,7 +899,7 @@ def build_arg_parser():
         description="Minimal ERP agent for Mago using Ollama or OpenAPI models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
-    parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    parser.add_argument("--subscription", default="StarBoltTrading", help="User subscription")
     parser.add_argument("--provider", default="Ollama", help="Model provider: Ollama or OpenAPI")
     parser.add_argument("--model", default="qwen3.5:4b", help="Model name.")
     parser.add_argument("--host", default="", help="Model server URL.")
