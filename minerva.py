@@ -53,6 +53,11 @@ MAX_TOOL_OUTPUT = 4000
 MAX_HISTORY = 12000
 IGNORED_PATH_NAMES = {".git", ".minerva", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
+DEFAULT_OPENAPI_HOST = "http://localhost:4000/v1"
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+
+
+
 ##############################
 #### Six Agent Components ####
 ##############################
@@ -267,6 +272,136 @@ class OllamaModelClient:
         thinking = "".join(thinking_parts)
         return content, thinking, mismatched_tool_calls
 
+class OpenAPIModelClient:
+    def __init__(self, model, host, api_key, temperature, top_p, timeout):
+        self.model = model
+        self.host = host.rstrip("/")
+        self.api_key = api_key
+        self.temperature = temperature
+        self.top_p = top_p
+        self.timeout = timeout
+
+    def complete(self, prompt, max_new_tokens):
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "stream": True,
+            "max_tokens": max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+        }
+        request = urllib.request.Request(
+            self.host + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            thinking_parts = []
+            response_parts = []
+            mismatched_tool_calls = []
+
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout
+            ) as response:
+
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+
+                    # Nello stream SSE possono esserci righe vuote
+                    if not line:
+                        continue
+
+                    # OpenAI usa Server-Sent Events:
+                    # data: {...}
+                    if not line.startswith("data:"):
+                        continue
+
+                    payload_text = line[len("data:"):].strip()
+
+                    # Termine dello stream OpenAI-compatible
+                    if payload_text == "[DONE]":
+                        break
+
+                    try:
+                        data = json.loads(payload_text)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"Invalid JSON received from OpenAPI: {payload_text}"
+                        ) from exc
+
+                    if data.get("error"):
+                        error = data["error"]
+
+                        if isinstance(error, dict):
+                            error_message = error.get("message", json.dumps(error))
+                        else:
+                            error_message = str(error)
+
+                        raise RuntimeError(f"OpenAPI error: {error_message}")
+
+                    choices = data.get("choices", [])
+
+                    if not choices:
+                        # Alcuni eventi possono contenere soltanto metadati
+                        # o informazioni sull'utilizzo dei token.
+                        continue
+
+                    delta = choices[0].get("delta", {})
+
+                    # Testo normale della risposta
+                    content_part = delta.get("content")
+
+                    if content_part:
+                        response_parts.append(content_part)
+
+                    # Il campo del reasoning non è completamente standardizzato.
+                    # Questi nomi coprono diversi modelli/provider tramite OpenAPI.
+                    thinking_part = (
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or delta.get("thinking")
+                    )
+
+                    if thinking_part:
+                        thinking_parts.append(thinking_part)
+
+                    # Predisposizione per le future tool call native.
+                    # In streaming, una singola tool call arriva normalmente
+                    # suddivisa in più frammenti.
+                    tool_call_parts = delta.get("tool_calls")
+
+                    if tool_call_parts:
+                        mismatched_tool_calls.extend(tool_call_parts)
+
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+
+            raise RuntimeError(
+                f"OpenAPI request failed with HTTP {exc.code}: {body}"
+            ) from exc
+
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach OpenAPI.\n"
+                "Make sure the OpenAPI proxy is running and reachable.\n"
+                f"Host: {self.host}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        content = "".join(response_parts)
+        thinking = "".join(thinking_parts)
+
+        return content, thinking, mismatched_tool_calls
 
 class MinervaAgent:
     def __init__(
@@ -959,17 +1094,27 @@ def build_welcome(agent, model, host):
     )
     return "\n".join([line, *rows, line])
 
-
 def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".minerva" / "sessions")
-    model = OllamaModelClient(
-        model=args.model,
-        host=args.host,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        timeout=args.ollama_timeout,
-    )
+    if (args.provider == "Ollama"):
+        model = OllamaModelClient(
+            model=args.model,
+            host=args.host or DEFAULT_OLLAMA_HOST,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            timeout=args.ollama_timeout,
+        )
+    else:
+        model = OpenAPIModelClient(
+            model=args.model,
+            host=args.host or DEFAULT_OPENAPI_HOST,
+            api_key="sk-yOHDbHo20oItSWOCNEmmYA",
+            temperature=args.temperature,
+            top_p=args.top_p,
+            timeout=args.ollama_timeout,
+        )
+
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
@@ -996,12 +1141,13 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal ERP agent for Mago using Ollama models.",
+        description="Minimal ERP agent for Mago using Ollama or OpenAPI models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model name.")
-    parser.add_argument("--host", default="http://127.0.0.1:11434", help="Ollama server URL.")
+    parser.add_argument("--provider", default="Ollama", help="Model provider: Ollama or OpenAPI")
+    parser.add_argument("--model", default="qwen3.5:4b", help="Model name.")
+    parser.add_argument("--host", default="", help="Model server URL.")
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
@@ -1012,8 +1158,8 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the model.")
+    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to the model.")
     return parser
 
 

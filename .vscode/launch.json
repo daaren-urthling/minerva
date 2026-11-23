@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "qwen3:8b",
+            "name": "Ollama - qwen3:8b",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
@@ -13,7 +13,7 @@
             "args": ["--model", "\"qwen3:8b\"" ]
         },
         {
-            "name": "qwen3.5",
+            "name": "Ollama - qwen3.5:4b",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
@@ -21,12 +21,21 @@
             "args": [ ]
         },
         {
-            "name": "north-mini",
+            "name": "Ollama - north-mini",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
             "args": ["--model", "\"north-mini\"" ]
-        }
+        },
+        {
+            "name": "OpenAPI - Qwen3.6",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["--provider", "OpenAPI", "--model", "aiservices_Qwen/Qwen3.6-35B-A3B" ]
+        },
+
     ]
 }
