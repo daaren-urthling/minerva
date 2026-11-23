@@ -694,69 +694,7 @@ class MinervaAgent:
 
     def validate_tool(self, name, args):
         args = args or {}
-
-        if name == "list_files":
-            path = self.path(args.get("path", "."))
-            if not path.is_dir():
-                raise ValueError("path is not a directory")
-            return
-
-        if name == "read_file":
-            path = self.path(args["path"])
-            if not path.is_file():
-                raise ValueError("path is not a file")
-            start = int(args.get("start", 1))
-            end = int(args.get("end", 200))
-            if start < 1 or end < start:
-                raise ValueError("invalid line range")
-            return
-
-        if name == "search":
-            pattern = str(args.get("pattern", "")).strip()
-            if not pattern:
-                raise ValueError("pattern must not be empty")
-            self.path(args.get("path", "."))
-            return
-
-        if name == "run_shell":
-            command = str(args.get("command", "")).strip()
-            if not command:
-                raise ValueError("command must not be empty")
-            timeout = int(args.get("timeout", 20))
-            if timeout < 1 or timeout > 120:
-                raise ValueError("timeout must be in [1, 120]")
-            return
-
-        if name == "write_file":
-            path = self.path(args["path"])
-            if path.exists() and path.is_dir():
-                raise ValueError("path is a directory")
-            if "content" not in args:
-                raise ValueError("missing content")
-            return
-
-        if name == "patch_file":
-            path = self.path(args["path"])
-            if not path.is_file():
-                raise ValueError("path is not a file")
-            old_text = str(args.get("old_text", ""))
-            if not old_text:
-                raise ValueError("old_text must not be empty")
-            if "new_text" not in args:
-                raise ValueError("missing new_text")
-            text = path.read_text(encoding="utf-8")
-            count = text.count(old_text)
-            if count != 1:
-                raise ValueError(f"old_text must occur exactly once, found {count}")
-            return
-
-        if name == "delegate":
-            if self.depth >= self.max_depth:
-                raise ValueError("delegate depth exceeded")
-            task = str(args.get("task", "")).strip()
-            if not task:
-                raise ValueError("task must not be empty")
-            return
+        # TODO implement the right validation for the new tooling
 
     def approve(self, name, args):
         if self.read_only:
@@ -877,26 +815,6 @@ class MinervaAgent:
         self.session["memory"] = {"task": "", "files": [], "notes": []}
         self.session_store.save(self.session)
 
-    def path_is_within_root(self, resolved):
-        probe = resolved
-        while not probe.exists() and probe.parent != probe:
-            probe = probe.parent
-        for candidate in (probe, *probe.parents):
-            try:
-                if candidate.samefile(self.root):
-                    return True
-            except OSError:
-                continue
-        return False
-
-    def path(self, raw_path):
-        path = Path(raw_path)
-        path = path if path.is_absolute() else self.root / path
-        resolved = path.resolve()
-        if not self.path_is_within_root(resolved):
-            raise ValueError(f"path escapes workspace: {raw_path}")
-        return resolved
-
     def customer_info(self, args):
         return json.dumps({
             "customer_code": "0042",
@@ -924,108 +842,6 @@ class MinervaAgent:
 
     def item_stock_level(self, args):
         return
-
-    def tool_list_files(self, args):
-        path = self.path(args.get("path", "."))
-        if not path.is_dir():
-            raise ValueError("path is not a directory")
-        entries = [
-            item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
-            if item.name not in IGNORED_PATH_NAMES
-        ]
-        lines = []
-        for entry in entries[:200]:
-            kind = "[D]" if entry.is_dir() else "[F]"
-            lines.append(f"{kind} {entry.relative_to(self.root)}")
-        return "\n".join(lines) or "(empty)"
-
-    def tool_read_file(self, args):
-        path = self.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        start = int(args.get("start", 1))
-        end = int(args.get("end", 200))
-        if start < 1 or end < start:
-            raise ValueError("invalid line range")
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-        return f"# {path.relative_to(self.root)}\n{body}"
-
-    def tool_search(self, args):
-        pattern = str(args.get("pattern", "")).strip()
-        if not pattern:
-            raise ValueError("pattern must not be empty")
-        path = self.path(args.get("path", "."))
-
-        if shutil.which("rg"):
-            result = subprocess.run(
-                ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-            )
-            return result.stdout.strip() or result.stderr.strip() or "(no matches)"
-
-        matches = []
-        files = [path] if path.is_file() else [
-            item for item in path.rglob("*")
-            if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(self.root).parts)
-        ]
-        for file_path in files:
-            for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                if pattern.lower() in line.lower():
-                    matches.append(f"{file_path.relative_to(self.root)}:{number}:{line}")
-                    if len(matches) >= 200:
-                        return "\n".join(matches)
-        return "\n".join(matches) or "(no matches)"
-
-    def tool_run_shell(self, args):
-        command = str(args.get("command", "")).strip()
-        if not command:
-            raise ValueError("command must not be empty")
-        timeout = int(args.get("timeout", 20))
-        if timeout < 1 or timeout > 120:
-            raise ValueError("timeout must be in [1, 120]")
-        result = subprocess.run(
-            command,
-            cwd=self.root,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return "\n".join(
-            [
-                f"exit_code: {result.returncode}",
-                "stdout:",
-                result.stdout.strip() or "(empty)",
-                "stderr:",
-                result.stderr.strip() or "(empty)",
-            ]
-        )
-
-    def tool_write_file(self, args):
-        path = self.path(args["path"])
-        content = str(args["content"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return f"wrote {path.relative_to(self.root)} ({len(content)} chars)"
-
-    def tool_patch_file(self, args):
-        path = self.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        old_text = str(args.get("old_text", ""))
-        if not old_text:
-            raise ValueError("old_text must not be empty")
-        if "new_text" not in args:
-            raise ValueError("missing new_text")
-        text = path.read_text(encoding="utf-8")
-        count = text.count(old_text)
-        if count != 1:
-            raise ValueError(f"old_text must occur exactly once, found {count}")
-        path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
-        return f"patched {path.relative_to(self.root)}"
 
     ###################################################
     #### 6) Delegation And Bounded Subagents ##########
