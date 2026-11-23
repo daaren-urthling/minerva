@@ -54,7 +54,7 @@ MAX_HISTORY = 12000
 IGNORED_PATH_NAMES = {".git", ".minerva", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 DEFAULT_OPENAPI_HOST = "http://localhost:4000/v1"
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_HOST = "http://localhost:11434/v1"
 
 
 
@@ -141,79 +141,6 @@ class FakeModelClient:
         if not self.outputs:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
-
-class OllamaModelClient:
-    def __init__(self, model, host, temperature, top_p, timeout):
-        self.model = model
-        self.host = host.rstrip("/")
-        self.temperature = temperature
-        self.top_p = top_p
-        self.timeout = timeout
-
-    def complete(self, prompt, max_new_tokens):
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            # stream = true give a response splitted in parts, but also returns non-existing tools call
-            # useful for diagnostic
-            "stream": True,
-            "think": True,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        request = urllib.request.Request(
-            self.host + "/api/chat",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            thinking_parts = []
-            response_parts = []
-            mismatched_tool_calls = []
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                for line in response:
-                        if not line.strip():
-                            continue
-
-                        data = json.loads(line.decode("utf-8"))
-
-                        if data.get("error"):
-                            raise RuntimeError(f"Ollama error: {data['error']}")
-
-                        message = data.get("message", {})
-
-                        if message.get("thinking"):
-                            thinking_parts.append(message["thinking"])
-
-                        if message.get("content"):
-                            response_parts.append(message["content"])
-
-                        if message.get("tool_calls"):
-                            mismatched_tool_calls.extend(message["tool_calls"])
-
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
-                f"Host: {self.host}\n"
-                f"Model: {self.model}"
-            ) from exc
-
-        content = "".join(response_parts)
-        thinking = "".join(thinking_parts)
-        return content, thinking, mismatched_tool_calls
 
 class OpenAPIModelClient:
     def __init__(self, model, host, api_key, temperature, top_p, timeout):
@@ -853,12 +780,13 @@ def build_agent(args):
     subscription = SubscriptionContext.build(args.subscription)
     store = SessionStore(base_path() / ".minerva" / "sessions")
     if (args.provider == "Ollama"):
-        model = OllamaModelClient(
+        model = OpenAPIModelClient(
             model=args.model,
             host=args.host or DEFAULT_OLLAMA_HOST,
+            api_key="ollama",
             temperature=args.temperature,
             top_p=args.top_p,
-            timeout=args.ollama_timeout,
+            timeout=args.timeout,
         )
     else:
         model = OpenAPIModelClient(
@@ -867,7 +795,7 @@ def build_agent(args):
             api_key="sk-yOHDbHo20oItSWOCNEmmYA",
             temperature=args.temperature,
             top_p=args.top_p,
-            timeout=args.ollama_timeout,
+            timeout=args.timeout,
         )
 
     session_id = args.resume
@@ -903,7 +831,7 @@ def build_arg_parser():
     parser.add_argument("--provider", default="Ollama", help="Model provider: Ollama or OpenAPI")
     parser.add_argument("--model", default="qwen3.5:4b", help="Model name.")
     parser.add_argument("--host", default="", help="Model server URL.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
+    parser.add_argument("--timeout", type=int, default=300, help="Provider request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
         "--approval",
