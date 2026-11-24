@@ -12,6 +12,9 @@ to parse and execute.
 
 Do not use native function calling.
 
+Some tools may require user approval before execution.
+The application will manage approval when required.
+
 SERVICE LOOP
 
 A task may require a sequence of service requests across multiple turns.

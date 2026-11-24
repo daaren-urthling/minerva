@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
+from tools import build_tools
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -152,6 +153,10 @@ class OpenAPIModelClient:
         self.timeout = timeout
 
     def complete(self, prompt, max_new_tokens):
+        openai_tools = [
+            tool.openai_definition()
+            for tool in self.tools.values()
+        ]
         payload = {
             "model": self.model,
             "messages": [
@@ -160,6 +165,7 @@ class OpenAPIModelClient:
                     "content": prompt
                 }
             ],
+            "tools": openai_tools,
             "stream": True,
             "max_tokens": max_new_tokens,
             "temperature": self.temperature,
@@ -177,7 +183,11 @@ class OpenAPIModelClient:
         try:
             thinking_parts = []
             response_parts = []
-            mismatched_tool_calls = []
+            # mismatched_tool_calls = []
+
+            # Una risposta può contenere più tool call.
+            # In streaming vengono ricostruite usando il campo "index".
+            tool_calls_by_index = {}
 
             with urllib.request.urlopen(
                 request,
@@ -245,13 +255,49 @@ class OpenAPIModelClient:
                     if thinking_part:
                         thinking_parts.append(thinking_part)
 
-                    # Predisposizione per le future tool call native.
-                    # In streaming, una singola tool call arriva normalmente
-                    # suddivisa in più frammenti.
-                    tool_call_parts = delta.get("tool_calls")
+                    # Tool call native.
+                    # Ogni chiamata può arrivare suddivisa in più frammenti.
+                    for tool_call_part in delta.get("tool_calls", []):
 
-                    if tool_call_parts:
-                        mismatched_tool_calls.extend(tool_call_parts)
+                        index = tool_call_part.get("index", 0)
+
+                        if index not in tool_calls_by_index:
+                            tool_calls_by_index[index] = {
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "name": "",
+                                    "arguments": "",
+                                },
+                            }
+
+                        tool_call = tool_calls_by_index[index]
+                        
+                        # Anche l'id può teoricamente arrivare per frammenti.
+                        call_id_part = tool_call_part.get("id")
+
+                        if call_id_part:
+                            tool_call["id"] += call_id_part
+
+                        call_type = tool_call_part.get("type")
+
+                        if call_type:
+                            tool_call["type"] = call_type
+
+                        function_part = tool_call_part.get("function", {})
+
+                        name_part = function_part.get("name")
+
+                        if name_part:
+                            tool_call["function"]["name"] += name_part
+
+                        arguments_part = function_part.get("arguments")
+
+                        if arguments_part:
+                            tool_call["function"]["arguments"] += arguments_part
+
+                    # if tool_call_parts:
+                    #     mismatched_tool_calls.extend(tool_call_parts)
 
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -271,7 +317,13 @@ class OpenAPIModelClient:
         content = "".join(response_parts)
         thinking = "".join(thinking_parts)
 
-        return content, thinking, mismatched_tool_calls
+        tool_calls = [
+            tool_calls_by_index[index]
+            for index in sorted(tool_calls_by_index)
+        ]
+
+        # return content, thinking, mismatched_tool_calls
+        return content, thinking, tool_calls
 
 class MinervaAgent:
     def __init__(
@@ -302,9 +354,10 @@ class MinervaAgent:
             "created_at": now(),
             "subscription": subscription.name,
             "history": [],
-            "memory": {"task": "", "files": [], "notes": []},
+            "memory": {"task": "", "notes": []},
         }
-        self.tools = self.build_tools()
+        # self.tools = self.build_tools()
+        self.tools = build_tools(self)
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
 
@@ -330,48 +383,48 @@ class MinervaAgent:
     ###############################################
     #### 3) Structured Tools And Permissions ######
     ###############################################
-    def build_tools(self):
-        tools = {
-            "CUSTOMER_INFO": {
-                "schema": {"customer_code": "str"},
-                "risky": False,
-                "description": "Returns: company_name, address, telephone and other company info",
-                "run": self.customer_info,
-            },
+    # def build_tools(self):
+    #     tools = {
+    #         "CUSTOMER_INFO": {
+    #             "schema": {"customer_code": "str"},
+    #             "risky": False,
+    #             "description": "Returns: company_name, address, telephone and other company info",
+    #             "run": self.customer_info,
+    #         },
 
-            "SEARCH_PEOPLE": {
-                "schema": {"name": "str", "last_name": "str"},
-                "risky": False,
-                "description": "Returns:customer_code or empty result when not found",
-                "run": self.search_people,
-            },
-            "ITEM_INFO": {
-                "schema": {"item_code": "str"},
-                "risky": False,
-                "description": "Returns item information: description, price, etc.",
-                "run": self.item_info,
-            },
-            "SEARCH_ITEM": {
-                "schema": {"description": "str"},
-                "risky": False,
-                "description": "Returns item code or empty result when not found. Wildcards are allowed.",
-                "run": self.search_item,
-            },
-            "STOCK_LEVEL": {
-                "schema": {"item_code": "str"},
-                "risky": False,
-                "description": "Returns the current stock level of the item, and the unit of measure it is expressed: pieces, boxes, etc.",
-                "run": self.item_stock_level,
-            },
-        }
-        if self.depth < self.max_depth:
-            tools["DELEGATE"] = {
-                "schema": {"task": "str", "max_steps": "int=3"},
-                "risky": False,
-                "description": "Ask a bounded read-only child agent to investigate.",
-                "run": self.tool_delegate,
-            }
-        return tools
+    #         "SEARCH_PEOPLE": {
+    #             "schema": {"name": "str", "last_name": "str"},
+    #             "risky": False,
+    #             "description": "Returns:customer_code or empty result when not found",
+    #             "run": self.search_people,
+    #         },
+    #         "ITEM_INFO": {
+    #             "schema": {"item_code": "str"},
+    #             "risky": False,
+    #             "description": "Returns item information: description, price, etc.",
+    #             "run": self.item_info,
+    #         },
+    #         "SEARCH_ITEM": {
+    #             "schema": {"description": "str"},
+    #             "risky": False,
+    #             "description": "Returns item code or empty result when not found. Wildcards are allowed.",
+    #             "run": self.search_item,
+    #         },
+    #         "STOCK_LEVEL": {
+    #             "schema": {"item_code": "str"},
+    #             "risky": False,
+    #             "description": "Returns the current stock level of the item, and the unit of measure it is expressed: pieces, boxes, etc.",
+    #             "run": self.item_stock_level,
+    #         },
+    #     }
+    #     if self.depth < self.max_depth:
+    #         tools["DELEGATE"] = {
+    #             "schema": {"task": "str", "max_steps": "int=3"},
+    #             "risky": False,
+    #             "description": "Ask a bounded read-only child agent to investigate.",
+    #             "run": self.tool_delegate,
+    #         }
+    #     return tools
 
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
@@ -380,21 +433,21 @@ class MinervaAgent:
         
         rules = Path(base_path(), "assets", "system_prompt.md").read_text(encoding="utf-8")
 
-        tool_lines = []
-        for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
-            risk = "approval required" if tool["risky"] else "safe"
-            tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
-        tool_text = "\n".join(tool_lines)
+        # tool_lines = []
+        # for name, tool in self.tools.items():
+        #     fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
+        #     risk = "approval required" if tool["risky"] else "safe"
+        #     tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
+        # tool_text = "\n".join(tool_lines)
 
-        examples = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
+        # examples = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
 
         subscription_info = Path(base_path(), "assets", "subscription_info.md").read_text(encoding="utf-8")
 
         return "\n\n".join([
             rules,
-            "**AVAILABLE SERVICE REQUESTS**:\n" + tool_text,
-            examples,
+            # "**AVAILABLE SERVICE REQUESTS**:\n" + tool_text,
+            # examples,
             subscription_info
         ])
 
@@ -404,7 +457,6 @@ class MinervaAgent:
         return "\n".join([
             "Memory:",
             f"- task: {memory['task'] or '-'}",
-            f"- files: {', '.join(memory['files']) or '-'}",
             "- notes:",
             notes,
         ])
@@ -452,11 +504,40 @@ class MinervaAgent:
             "Current user request:\n" + user_message,
         ])
 
-    def log(self, num, message):
+    def build_messages(self, user_message):
+        messages = [
+            {
+                "role" : "system",
+                "content" : self.prefix
+            }
+        ]
+
+        memory = self.memory_text()
+
+        if memory:
+            messages.append({
+                "role": "system",
+                "content" : "Memory:\n"+ memory
+            })
+
+        messages.extend(self.hystory_messages())
+    
+        messages.append({
+                "role": "user",
+                "content": user_message
+        })
+
+            # self.memory_text(),
+            # "Transcript:\n" + self.history_text(),
+        # ]
+
+        return messages
+
+    def log(self, num, messages):
         logfile = os.path.join(self.session_store.root, self.session["id"] + "-prompt.log")
         with open(logfile, "a", encoding="utf-8") as log:
             print("============================ ", num, file=log)
-            pprint(message, stream=log)
+            print(json.dumps(messages, stream=log, indent=2, ensure_ascii=False))
 
     ###############################################
     #### 5) Session Memory (Continued) ###########
@@ -467,9 +548,6 @@ class MinervaAgent:
 
     def note_tool(self, name, args, result):
         memory = self.session["memory"]
-        path = args.get("path")
-        if name in {"read_file", "write_file", "patch_file"} and path:
-            self.remember(memory["files"], str(path), 8)
         # TODO tool results where truncated: it make sense for file content, but not really for ERP queries
         # however, a stategy for dealing with big batches of returned data should be found
         # note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
@@ -486,38 +564,162 @@ class MinervaAgent:
         attempts = 0
         max_attempts = max(self.max_steps * 3, self.max_steps + 4)
 
-        while tool_steps < self.max_steps and attempts < max_attempts:
+        # while tool_steps < self.max_steps and attempts < max_attempts:
+        while attempts < max_attempts:
             attempts += 1
-            prompt = self.prompt(user_message)
-            self.log(attempts, prompt)
-            raw, thinking, mismatched_tools = self.model_client.complete(prompt, self.max_new_tokens)
-            kind, payload = self.parse(raw)
+            # prompt = self.prompt(user_message)
+            messages = self.build_messages(user_message)
+            # self.log(attempts, prompt)
+            self.log(attempts, messages)
+            # raw, thinking, tool_calls = self.model_client.complete(prompt, self.max_new_tokens)
+            raw, thinking, tool_calls = self.model_client.complete(messages, self.max_new_tokens)
+#region old
+            # kind, payload = self.parse(raw)
 
-            if kind == "tool":
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                result = self.run_tool(name, args)
+            # if kind == "tool":
+            #     tool_steps += 1
+            #     name = payload.get("name", "")
+            #     args = payload.get("args", {})
+            #     result = self.run_tool(name, args)
+            #     self.record(
+            #         {
+            #             "role": "tool",
+            #             "name": name,
+            #             "args": args,
+            #             "content": result,
+            #             "created_at": now(),
+            #             "thinking" : thinking,
+            #             "mismatched_tools": mismatched_tools
+            #         }
+            #     )
+#endregion
+
+            if tool_calls:
+                # È indispensabile conservare anche il messaggio assistant
+                # che contiene le richieste dei tool.
                 self.record(
                     {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
+                        "role": "assistant",
+                        "content": raw or None,
+                        "tool_calls": tool_calls,
                         "created_at": now(),
-                        "thinking" : thinking,
-                        "mismatched_tools": mismatched_tools
+                        "thinking": thinking,
                     }
                 )
+
+                for tool_call in tool_calls:
+                    call_id = tool_call["id"]
+                    function = tool_call["function"]
+
+                    name = function["name"]
+                    arguments_json = function.get("arguments", "{}")
+
+                    args = {}
+
+                    try:
+                        args = json.loads(arguments_json)
+
+                        if not isinstance(args, dict):
+                            raise ValueError(
+                                "Tool arguments must be a JSON object"
+                            )
+
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        result = {
+                            "success": False,
+                            "error": (
+                                f"Invalid arguments for tool {name}: {exc}"
+                            ),
+                        }
+
+                    else:
+                        if tool_steps >= self.max_steps:
+                            result = {
+                                "success": False,
+                                "error": (
+                                    "Maximum number of tool calls reached. "
+                                    "Do not request additional tools; provide the "
+                                    "best possible answer using the available results."
+                                ),
+                            }
+
+                        else:
+                            tool_steps += 1
+
+                            try:
+                                result = self.run_tool(name, args)
+
+                            except ValueError as exc:
+                                # Errore previsto e utile al modello:
+                                # validazione semantica o argomento non accettabile.
+                                result = {
+                                    "success": False,
+                                    "error": str(exc),
+                                }
+
+                            except Exception as exc:
+                                # Registrare internamente il dettaglio tecnico,
+                                # senza esporlo integralmente al modello.
+                                self.log_tool_error(
+                                    name=name,
+                                    args=args,
+                                    error=exc,
+                                )
+
+                                result = {
+                                    "success": False,
+                                    "error": "Internal tool execution error",
+                                }
+
+                    # Il content del messaggio tool deve essere una stringa.
+                    if isinstance(result, str):
+                        result_content = result
+                    else:
+                        result_content = json.dumps(
+                            result,
+                            ensure_ascii=False,
+                            default=str,
+                        )
+
+                    self.record(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": name,
+                            "args": args,
+                            "content": result_content,
+                            "created_at": now(),
+                        }
+                    )
                 self.note_tool(name, args, result)
+                # La prossima iterazione ricostruirà il prompt includendo:
+                # 1. il messaggio assistant con tool_calls;
+                # 2. un messaggio role=tool per ogni risultato.
                 continue
 
-            if kind == "retry":
-                self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+            # if kind == "retry":
+            #     self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+            #     continue
+
+            # final = (payload or raw).strip()
+            final = (raw or "").strip()
+
+            if not final:
+                # Risposta anomala: nessun testo e nessuna tool call.
+                self.record(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "The model returned neither content nor tool calls."
+                        ),
+                        "created_at": now(),
+                        "thinking": thinking,
+                    }
+                )
                 continue
 
-            final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+            # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
             self.remember(memory["notes"], clip(final, 220), 5)
             return final
 
@@ -531,26 +733,36 @@ class MinervaAgent:
     #############################################################
     #### 3) Structured Tools, Validation, And Permissions #######
     #############################################################
-    def run_tool(self, name, args):
+    def run_tool(self, name: str, args: dict):
         tool = self.tools.get(name)
+
         if tool is None:
-            return f"error: unknown tool '{name}'"
-        try:
-            self.validate_tool(name, args)
-        except Exception as exc:
-            example = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
-            message = f"error: invalid arguments for {name}: {exc}"
-            if example:
-                message += f"\nexample: {example}"
-            return message
-        if self.repeated_tool_call(name, args):
-            return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-        if tool["risky"] and not self.approve(name, args):
-            return f"error: approval denied for {name}"
-        try:
-            return clip(tool["run"](args))
-        except Exception as exc:
-            return f"error: tool {name} failed: {exc}"
+            raise ValueError(f"Unknown tool: {name}")
+
+        tool.validate(args)
+
+        return tool.run(**args)
+    
+    # def run_tool(self, name, args):
+    #     tool = self.tools.get(name)
+    #     if tool is None:
+    #         return f"error: unknown tool '{name}'"
+    #     try:
+    #         self.validate_tool(name, args)
+    #     except Exception as exc:
+    #         example = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
+    #         message = f"error: invalid arguments for {name}: {exc}"
+    #         if example:
+    #             message += f"\nexample: {example}"
+    #         return message
+    #     if self.repeated_tool_call(name, args):
+    #         return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
+    #     if tool["risky"] and not self.approve(name, args):
+    #         return f"error: approval denied for {name}"
+    #     try:
+    #         return clip(tool["run"](args))
+    #     except Exception as exc:
+    #         return f"error: tool {name} failed: {exc}"
 
     def repeated_tool_call(self, name, args):
         tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
@@ -679,7 +891,7 @@ class MinervaAgent:
 
     def reset(self):
         self.session["history"] = []
-        self.session["memory"] = {"task": "", "files": [], "notes": []}
+        self.session["memory"] = {"task": "", "notes": []}
         self.session_store.save(self.session)
 
     def customer_info(self, args):
