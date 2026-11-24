@@ -133,15 +133,21 @@ class SessionStore:
 
 
 class FakeModelClient:
-    def __init__(self, outputs):
+    def __init__(self, outputs_file):
+        outputs = json.loads(Path(base_path(), "test_outputs", outputs_file).read_text(encoding="utf-8"))
+
         self.outputs = list(outputs)
         self.prompts = []
 
-    def complete(self, prompt, max_new_tokens):
-        self.prompts.append(prompt)
+    # def complete(self, prompt, tools, max_new_tokens):
+    def complete(self, messages, tools, max_new_tokens):
+        self.prompts.append(messages)
         if not self.outputs:
             raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
+
+        output = self.outputs.pop(0)
+        
+        return output["raw"], output["thinking"], output["tool_calls"]
 
 class OpenAPIModelClient:
     def __init__(self, model, host, api_key, temperature, top_p, timeout):
@@ -152,20 +158,13 @@ class OpenAPIModelClient:
         self.top_p = top_p
         self.timeout = timeout
 
-    def complete(self, prompt, max_new_tokens):
-        openai_tools = [
-            tool.openai_definition()
-            for tool in self.tools.values()
-        ]
+    # def complete(self, prompt, max_new_tokens):
+    def complete(self, messages, tools, max_new_tokens):
+        
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "tools": openai_tools,
+            "messages": messages,
+            "tools": tools,
             "stream": True,
             "max_tokens": max_new_tokens,
             "temperature": self.temperature,
@@ -358,6 +357,11 @@ class MinervaAgent:
         }
         # self.tools = self.build_tools()
         self.tools = build_tools(self)
+        self.tools_definition = [
+            tool.openai_definition()
+            for tool in self.tools.values()
+        ]
+
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
 
@@ -383,6 +387,7 @@ class MinervaAgent:
     ###############################################
     #### 3) Structured Tools And Permissions ######
     ###############################################
+#region old code
     # def build_tools(self):
     #     tools = {
     #         "CUSTOMER_INFO": {
@@ -425,6 +430,7 @@ class MinervaAgent:
     #             "run": self.tool_delegate,
     #         }
     #     return tools
+#endregion
 
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
@@ -493,6 +499,18 @@ class MinervaAgent:
 
         return clip("\n".join(lines), MAX_HISTORY)
 
+    def history_messages(self):
+        history = self.session["history"]
+        if not history:
+            return []
+        
+        exclude = {"created_at", "thinking"}
+
+        return [
+            {k: v for k, v in item.items() if k not in exclude}
+            for item in history
+        ]
+
     ########################################################
     #### 2) Prompt Shape And Cache Reuse (Continued) #######
     ########################################################
@@ -520,12 +538,13 @@ class MinervaAgent:
                 "content" : "Memory:\n"+ memory
             })
 
-        messages.extend(self.hystory_messages())
+        messages.extend(self.history_messages())
     
-        messages.append({
-                "role": "user",
-                "content": user_message
-        })
+        # already in history
+        # messages.append({
+        #         "role": "user",
+        #         "content": user_message
+        # })
 
             # self.memory_text(),
             # "Transcript:\n" + self.history_text(),
@@ -536,8 +555,7 @@ class MinervaAgent:
     def log(self, num, messages):
         logfile = os.path.join(self.session_store.root, self.session["id"] + "-prompt.log")
         with open(logfile, "a", encoding="utf-8") as log:
-            print("============================ ", num, file=log)
-            print(json.dumps(messages, stream=log, indent=2, ensure_ascii=False))
+            print(json.dumps({"iteration" : num, "messages" :messages }, indent=2, ensure_ascii=False), file=log)
 
     ###############################################
     #### 5) Session Memory (Continued) ###########
@@ -572,7 +590,11 @@ class MinervaAgent:
             # self.log(attempts, prompt)
             self.log(attempts, messages)
             # raw, thinking, tool_calls = self.model_client.complete(prompt, self.max_new_tokens)
-            raw, thinking, tool_calls = self.model_client.complete(messages, self.max_new_tokens)
+            raw, thinking, tool_calls = self.model_client.complete(
+                messages = messages, 
+                tools = self.tools_definition,
+                max_new_tokens = self.max_new_tokens
+            )
 #region old
             # kind, payload = self.parse(raw)
 
@@ -660,11 +682,11 @@ class MinervaAgent:
                             except Exception as exc:
                                 # Registrare internamente il dettaglio tecnico,
                                 # senza esporlo integralmente al modello.
-                                self.log_tool_error(
-                                    name=name,
-                                    args=args,
-                                    error=exc,
-                                )
+                                # self.log_tool_error(
+                                #     name=name,
+                                #     args=args,
+                                #     error=exc,
+                                # )
 
                                 result = {
                                     "success": False,
@@ -723,11 +745,11 @@ class MinervaAgent:
             self.remember(memory["notes"], clip(final, 220), 5)
             return final
 
-        if attempts >= max_attempts and tool_steps < self.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-        else:
-            final = "Stopped after reaching the step limit without a final answer."
-        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+        final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+        
+        # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
+        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
+        
         return final
 
     #############################################################
@@ -742,7 +764,8 @@ class MinervaAgent:
         tool.validate(args)
 
         return tool.run(**args)
-    
+
+#region old code    
     # def run_tool(self, name, args):
     #     tool = self.tools.get(name)
     #     if tool is None:
@@ -763,6 +786,7 @@ class MinervaAgent:
     #         return clip(tool["run"](args))
     #     except Exception as exc:
     #         return f"error: tool {name} failed: {exc}"
+#endregion
 
     def repeated_tool_call(self, name, args):
         tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
@@ -894,7 +918,7 @@ class MinervaAgent:
         self.session["memory"] = {"task": "", "notes": []}
         self.session_store.save(self.session)
 
-    def customer_info(self, args):
+    def customer_info(self, customer_code):
         return json.dumps({
             "customer_code": "0042",
             "company_name": "ACME ltd",
@@ -907,19 +931,19 @@ class MinervaAgent:
             "e_mail": "sales@acmeglobal.com",
         })
 
-    def search_people(self, args):
+    def search_people(self, name, last_name):
         return json.dumps({
             "customer_code": "0042",
             "working_position": "owner",
         })
 
-    def item_info(self, args):
+    def item_info(self, item_code):
         return
 
-    def search_item(self, args):
+    def search_item(self, description):
         return
 
-    def item_stock_level(self, args):
+    def item_stock_level(self, item_code):
         return
 
     ###################################################
@@ -943,7 +967,8 @@ class MinervaAgent:
             read_only=True,
         )
         child.session["memory"]["task"] = task
-        child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
+        # child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
+        child.session["memory"]["notes"] = [clip(self.history_messages(), 300)]
         return "delegate_result:\n" + child.ask(task)
 
 
@@ -999,6 +1024,10 @@ def build_agent(args):
             temperature=args.temperature,
             top_p=args.top_p,
             timeout=args.timeout,
+        )
+    elif (args.provider == "Fake"):
+        model = FakeModelClient(
+           outputs_file = "test_output_1.json",
         )
     else:
         model = OpenAPIModelClient(
@@ -1097,7 +1126,7 @@ def main(argv=None):
             continue
         if user_input == "/thinking":
             print(agent.session["history"][-1]["thinking"])
-            pprint(agent.session["history"][-1]["mismatched_tools"])
+            # pprint(agent.session["history"][-1]["mismatched_tools"])
             continue
         if user_input == "/reset":
             agent.reset()

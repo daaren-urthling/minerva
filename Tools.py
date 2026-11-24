@@ -75,7 +75,8 @@ class SearchPeopleTool(Tool):
             raise ValueError("name and last_name cannot both be empty")
 
     def run(self, **args: Any) -> Any:
-        return self.owner.search_people(**args)
+        result = self.owner.search_people(**args)
+        return result
 
 
 class ItemInfoTool(Tool):

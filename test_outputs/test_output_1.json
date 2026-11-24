@@ -1,0 +1,38 @@
+[
+    {
+        "raw" : "",
+        "thinking" : "",
+        "tool_calls" : [
+            {
+                "id": "call_872gynqm", 
+                "type": "function", 
+                "function": {
+                    "name": "search_people", 
+                    "arguments": "{\"name\":\"John\",\"last_name\":\"Smith\"}"
+                }
+            }
+        ]
+    },
+
+    {
+        "raw" : "",
+        "thinking" : "",
+         "tool_calls" : [
+            {
+                "id": "call_anzrbuwj", 
+                "type": "function", 
+                "function": {
+                    "name": "customer_info", 
+                    "arguments": "{\"customer_code\":\"0042\"}"
+                }
+            }
+        ]
+    },
+
+    {
+        "raw" : "'The telephone numbers for Mr. John Smith (owner of ACME ltd) are:\n\n- **Telephone 1:** 040 5657746\n- **Telephone 2:** 040 6657288\n\nLet me know if you need additional contact details!'",
+        "thinking" : "",
+        "tool_calls" : [ ]
+    }
+
+]
