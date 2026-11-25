@@ -283,3 +283,53 @@ summary {
     object-fit: contain;
     flex-shrink: 0;
 }
+
+.cachedContext {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.cachedContext summary {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.cachedContext .content {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    max-height: 300px;
+    overflow: auto;
+}
+
+.cachedContext {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.cachedContext summary {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.cachedContextBody {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cachedContextItem {
+    padding: 7px 9px;
+    background: var(--bg);
+    border-radius: 7px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

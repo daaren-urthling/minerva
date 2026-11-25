@@ -590,7 +590,13 @@ class MinervaAgent:
         # however, a stategy for dealing with big batches of returned data should be found
         # note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
         # note = f"{name}: {clip(str(result).replace(chr(10), ' '))}"
-        note = json.dumps(memory, separators=(",", ":"), default=str)
+        argss = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        res = json.loads(result)
+        if isinstance(res, dict):
+            results = ", ".join(f"{k}: {v!r}" for k, v in res.items())
+        else:
+            results = result;
+        note = f"{name}({argss})={{{results}}}"
         self.remember(memory["notes"], note, 5)
 
     def ask(self, user_input):
@@ -764,6 +770,7 @@ class MinervaAgent:
             # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
             self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
             self.remember(memory["notes"], clip(final, 220), 5)
+            self.log(attempts, messages)
             return final
 
         final = "Stopped after too many malformed model responses without a valid tool call or final answer."
@@ -771,6 +778,7 @@ class MinervaAgent:
         # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
         self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
         
+        self.log(attempts, messages)
         return final
 
     #############################################################
