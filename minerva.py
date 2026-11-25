@@ -52,9 +52,8 @@ HELP_DETAILS = "\n".join(
 )
 MAX_TOOL_OUTPUT = 4000
 MAX_HISTORY = 12000
-IGNORED_PATH_NAMES = {".git", ".minerva", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
-DEFAULT_OPENAPI_HOST = "http://localhost:4000/v1"
+DEFAULT_LITELLM_HOST = "http://localhost:4000/v1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434/v1"
 
 
@@ -458,14 +457,18 @@ class MinervaAgent:
         ])
 
     def memory_text(self):
-        memory = self.session["memory"]
-        notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
-        return "\n".join([
-            "Memory:",
-            f"- task: {memory['task'] or '-'}",
-            "- notes:",
-            notes,
-        ])
+        # memory = self.session["memory"]
+        # notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
+        # return "\n".join([
+        #     "Memory:",
+        #     # f"- task: {memory['task'] or '-'}",
+        #     "- notes:",
+        #     notes,
+        # ])
+        notes = ""
+        if self.session["memory"]:
+            notes = self.session["memory"]["notes"]
+        return notes
 
     #####################################################
     #### 4) Context Reduction And Output Management #####
@@ -522,7 +525,32 @@ class MinervaAgent:
             "Current user request:\n" + user_message,
         ])
 
-    def build_messages(self, user_message):
+    def build_user_message(
+        self,
+        user_input: str,
+        memory: str | None = None
+    ) -> dict:
+
+        if memory:
+            content = f"""
+            <cached_context>
+            {memory}
+            </cached_context>
+
+            <user_request>
+            {user_input}
+            </user_request>
+            """.strip()
+
+        else:
+            content = user_input
+
+        return {
+            "role": "user",
+            "content": content
+        }
+
+    def build_messages(self, user_input = None):
         messages = [
             {
                 "role" : "system",
@@ -530,25 +558,17 @@ class MinervaAgent:
             }
         ]
 
-        memory = self.memory_text()
-
-        if memory:
-            messages.append({
-                "role": "system",
-                "content" : "Memory:\n"+ memory
-            })
-
         messages.extend(self.history_messages())
-    
-        # already in history
-        # messages.append({
-        #         "role": "user",
-        #         "content": user_message
-        # })
 
-            # self.memory_text(),
-            # "Transcript:\n" + self.history_text(),
-        # ]
+        if user_input:
+            user_message = self.build_user_message(
+                user_input,
+                self.memory_text()
+            )
+    
+            messages.append(user_message)
+
+            self.record(user_message | {"created_at": now()})
 
         return messages
 
@@ -569,14 +589,15 @@ class MinervaAgent:
         # TODO tool results where truncated: it make sense for file content, but not really for ERP queries
         # however, a stategy for dealing with big batches of returned data should be found
         # note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
-        note = f"{name}: {clip(str(result).replace(chr(10), ' '))}"
+        # note = f"{name}: {clip(str(result).replace(chr(10), ' '))}"
+        note = json.dumps(memory, separators=(",", ":"), default=str)
         self.remember(memory["notes"], note, 5)
 
-    def ask(self, user_message):
+    def ask(self, user_input):
         memory = self.session["memory"]
-        if not memory["task"]:
-            memory["task"] = clip(user_message.strip(), 300)
-        self.record({"role": "user", "content": user_message, "created_at": now()})
+        # if not memory["task"]:
+        #     memory["task"] = clip(user_input.strip(), 300)
+        # self.record({"role": "user", "content": user_input, "created_at": now()})
 
         tool_steps = 0
         attempts = 0
@@ -586,7 +607,7 @@ class MinervaAgent:
         while attempts < max_attempts:
             attempts += 1
             # prompt = self.prompt(user_message)
-            messages = self.build_messages(user_message)
+            messages = self.build_messages(user_input if attempts <= 1 else None)
             # self.log(attempts, prompt)
             self.log(attempts, messages)
             # raw, thinking, tool_calls = self.model_client.complete(prompt, self.max_new_tokens)
@@ -812,106 +833,108 @@ class MinervaAgent:
             return False
         return answer.strip().lower() in {"y", "yes"}
 
-    @staticmethod
-    def parse(raw):
-        raw = str(raw)
-        if "<service>" in raw and ("<final>" not in raw or raw.find("<service>") < raw.find("<final>")):
-            body = MinervaAgent.extract(raw, "service")
-            try:
-                payload = json.loads(body)
-            except Exception:
-                return "retry", MinervaAgent.retry_notice("model returned malformed service JSON")
-            if not isinstance(payload, dict):
-                return "retry", MinervaAgent.retry_notice("service payload must be a JSON object")
-            if not str(payload.get("name", "")).strip():
-                return "retry", MinervaAgent.retry_notice("service payload is missing a service name")
-            args = payload.get("args", {})
-            if args is None:
-                payload["args"] = {}
-            elif not isinstance(args, dict):
-                return "retry", MinervaAgent.retry_notice()
-            return "tool", payload
-        if "<service" in raw and ("<final>" not in raw or raw.find("<service") < raw.find("<final>")):
-            payload = MinervaAgent.parse_xml_tool(raw)
-            if payload is not None:
-                return "service", payload
-            return "retry", MinervaAgent.retry_notice()
-        if "<final>" in raw:
-            final = MinervaAgent.extract(raw, "final").strip()
-            if final:
-                return "final", final
-            return "retry", MinervaAgent.retry_notice("model returned an empty <final> answer")
-        raw = raw.strip()
-        if raw:
-            return "final", raw
-        return "retry", MinervaAgent.retry_notice("model returned an empty response")
+#region old code
+    # @staticmethod
+    # def parse(raw):
+    #     raw = str(raw)
+    #     if "<service>" in raw and ("<final>" not in raw or raw.find("<service>") < raw.find("<final>")):
+    #         body = MinervaAgent.extract(raw, "service")
+    #         try:
+    #             payload = json.loads(body)
+    #         except Exception:
+    #             return "retry", MinervaAgent.retry_notice("model returned malformed service JSON")
+    #         if not isinstance(payload, dict):
+    #             return "retry", MinervaAgent.retry_notice("service payload must be a JSON object")
+    #         if not str(payload.get("name", "")).strip():
+    #             return "retry", MinervaAgent.retry_notice("service payload is missing a service name")
+    #         args = payload.get("args", {})
+    #         if args is None:
+    #             payload["args"] = {}
+    #         elif not isinstance(args, dict):
+    #             return "retry", MinervaAgent.retry_notice()
+    #         return "tool", payload
+    #     if "<service" in raw and ("<final>" not in raw or raw.find("<service") < raw.find("<final>")):
+    #         payload = MinervaAgent.parse_xml_tool(raw)
+    #         if payload is not None:
+    #             return "service", payload
+    #         return "retry", MinervaAgent.retry_notice()
+    #     if "<final>" in raw:
+    #         final = MinervaAgent.extract(raw, "final").strip()
+    #         if final:
+    #             return "final", final
+    #         return "retry", MinervaAgent.retry_notice("model returned an empty <final> answer")
+    #     raw = raw.strip()
+    #     if raw:
+    #         return "final", raw
+    #     return "retry", MinervaAgent.retry_notice("model returned an empty response")
 
-    @staticmethod
-    def retry_notice(problem=None):
-        prefix = "Runtime notice"
-        if problem:
-            prefix += f": {problem}"
-        else:
-            prefix += ": model returned malformed service output"
-        return (
-            f"{prefix}. Reply with a valid <service> call or a non-empty <final> answer."
-        )
+    # @staticmethod
+    # def retry_notice(problem=None):
+    #     prefix = "Runtime notice"
+    #     if problem:
+    #         prefix += f": {problem}"
+    #     else:
+    #         prefix += ": model returned malformed service output"
+    #     return (
+    #         f"{prefix}. Reply with a valid <service> call or a non-empty <final> answer."
+    #     )
 
-    @staticmethod
-    def parse_xml_tool(raw):
-        match = re.search(r"<service(?P<attrs>[^>]*)>(?P<body>.*?)</service>", raw, re.S)
-        if not match:
-            return None
-        attrs = MinervaAgent.parse_attrs(match.group("attrs"))
-        name = str(attrs.pop("name", "")).strip()
-        if not name:
-            return None
+    # @staticmethod
+    # def parse_xml_tool(raw):
+    #     match = re.search(r"<service(?P<attrs>[^>]*)>(?P<body>.*?)</service>", raw, re.S)
+    #     if not match:
+    #         return None
+    #     attrs = MinervaAgent.parse_attrs(match.group("attrs"))
+    #     name = str(attrs.pop("name", "")).strip()
+    #     if not name:
+    #         return None
 
-        body = match.group("body")
-        args = dict(attrs)
-        for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
-            if f"<{key}>" in body:
-                args[key] = MinervaAgent.extract_raw(body, key)
+    #     body = match.group("body")
+    #     args = dict(attrs)
+    #     for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
+    #         if f"<{key}>" in body:
+    #             args[key] = MinervaAgent.extract_raw(body, key)
 
-        body_text = body.strip("\n")
-        if name == "write_file" and "content" not in args and body_text:
-            args["content"] = body_text
-        if name == "delegate" and "task" not in args and body_text:
-            args["task"] = body_text.strip()
-        return {"name": name, "args": args}
+    #     body_text = body.strip("\n")
+    #     if name == "write_file" and "content" not in args and body_text:
+    #         args["content"] = body_text
+    #     if name == "delegate" and "task" not in args and body_text:
+    #         args["task"] = body_text.strip()
+    #     return {"name": name, "args": args}
 
-    @staticmethod
-    def parse_attrs(text):
-        attrs = {}
-        for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
-            attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
-        return attrs
+    # @staticmethod
+    # def parse_attrs(text):
+    #     attrs = {}
+    #     for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
+    #         attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
+    #     return attrs
 
-    @staticmethod
-    def extract(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:].strip()
-        return text[start:end].strip()
+    # @staticmethod
+    # def extract(text, tag):
+    #     start_tag = f"<{tag}>"
+    #     end_tag = f"</{tag}>"
+    #     start = text.find(start_tag)
+    #     if start == -1:
+    #         return text
+    #     start += len(start_tag)
+    #     end = text.find(end_tag, start)
+    #     if end == -1:
+    #         return text[start:].strip()
+    #     return text[start:end].strip()
 
-    @staticmethod
-    def extract_raw(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:]
-        return text[start:end]
+    # @staticmethod
+    # def extract_raw(text, tag):
+    #     start_tag = f"<{tag}>"
+    #     end_tag = f"</{tag}>"
+    #     start = text.find(start_tag)
+    #     if start == -1:
+    #         return text
+    #     start += len(start_tag)
+    #     end = text.find(end_tag, start)
+    #     if end == -1:
+    #         return text[start:]
+    #     return text[start:end]
+#endregion
 
     def reset(self):
         self.session["history"] = []
@@ -966,11 +989,11 @@ class MinervaAgent:
             max_depth=self.max_depth,
             read_only=True,
         )
+        # TODO this is wrong, task must come from input
         child.session["memory"]["task"] = task
         # child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
         child.session["memory"]["notes"] = [clip(self.history_messages(), 300)]
         return "delegate_result:\n" + child.ask(task)
-
 
 def build_welcome(agent, model, host):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
@@ -1032,7 +1055,7 @@ def build_agent(args):
     else:
         model = OpenAPIModelClient(
             model=args.model,
-            host=args.host or DEFAULT_OPENAPI_HOST,
+            host=args.host or DEFAULT_LITELLM_HOST,
             api_key="sk-yOHDbHo20oItSWOCNEmmYA",
             temperature=args.temperature,
             top_p=args.top_p,
@@ -1069,7 +1092,7 @@ def build_arg_parser():
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--subscription", default="StarBoltTrading", help="User subscription")
-    parser.add_argument("--provider", default="Ollama", help="Model provider: Ollama or OpenAPI")
+    parser.add_argument("--provider", default="Ollama", help="Model provider: Ollama or LiteLLM")
     parser.add_argument("--model", default="qwen3.5:4b", help="Model name.")
     parser.add_argument("--host", default="", help="Model server URL.")
     parser.add_argument("--timeout", type=int, default=300, help="Provider request timeout in seconds.")

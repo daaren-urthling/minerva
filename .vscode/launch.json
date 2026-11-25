@@ -29,12 +29,12 @@
             "args": ["--model", "\"north-mini\"" ]
         },
         {
-            "name": "OpenAPI - Qwen3.6",
+            "name": "LiteLLM - Qwen3.6",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--provider", "OpenAPI", "--model", "aiservices_Qwen/Qwen3.6-35B-A3B" ]
+            "args": ["--provider", "LiteLLM", "--model", "aiservices_Qwen/Qwen3.6-35B-A3B" ]
         },
         {
             "name": "Fake",
