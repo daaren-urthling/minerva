@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
 from tools import build_tools
-
+from mago_mcp import MagoMCP
 
 HELP_TEXT = "/help, /memory, /session, /thinking, /reset, /exit"
 WELCOME_ART = (
@@ -346,6 +346,7 @@ class MinervaAgent:
             "history": [],
             "memory": {"task": "", "notes": []},
         }
+        self.mago_mcp = MagoMCP()
         self.tools = build_tools(self)
         self.tools_definition = [
             tool.openai_definition()
@@ -656,7 +657,7 @@ class MinervaAgent:
         if tool.risky and not self.approve(name, args):
             raise ValueError(f"error: approval denied for {name}")
 
-        return tool.run(**args)
+        return json.dumps(tool.run(**args), ensure_ascii=False)
 
     def approve(self, name, args):
         if self.read_only:
@@ -675,34 +676,6 @@ class MinervaAgent:
         self.session["history"] = []
         self.session["memory"] = {"task": "", "notes": []}
         self.session_store.save(self.session)
-
-    def customer_info(self, customer_code):
-        return json.dumps({
-            "customer_code": "0042",
-            "company_name": "ACME ltd",
-            "tax_id_number": "02572020101",
-            "telephone1": "040 5657746",
-            "telephone2": "040 6657288",
-            "telex": "123-acme-7756",
-            "fax": "040 6577466",
-            "internet": "www.acmeglobal.com",
-            "e_mail": "sales@acmeglobal.com",
-        })
-
-    def search_people(self, name, last_name):
-        return json.dumps({
-            "customer_code": "0042",
-            "working_position": "owner",
-        })
-
-    def item_info(self, item_code):
-        return
-
-    def search_item(self, description):
-        return
-
-    def item_stock_level(self, item_code):
-        return
 
     ###################################################
     #### 6) Delegation And Bounded Subagents ##########

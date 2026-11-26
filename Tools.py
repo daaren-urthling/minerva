@@ -54,7 +54,7 @@ class CustomerInfoTool(Tool):
             raise ValueError("customer_code cannot be empty")
 
     def run(self, **args: Any) -> Any:
-        return self.owner.customer_info(**args)
+        return self.owner.mago_mcp.customer_info(**args)
 
 
 class SearchPeopleTool(Tool):
@@ -75,7 +75,7 @@ class SearchPeopleTool(Tool):
             raise ValueError("name and last_name cannot both be empty")
 
     def run(self, **args: Any) -> Any:
-        result = self.owner.search_people(**args)
+        result = self.owner.mago_mcp.search_people(**args)
         return result
 
 
@@ -96,7 +96,7 @@ class ItemInfoTool(Tool):
             raise ValueError("item_code cannot be empty")
 
     def run(self, **args: Any) -> Any:
-        return self.owner.item_info(**args)
+        return self.owner.mago_mcp.item_info(**args)
 
 
 class SearchItemTool(Tool):
@@ -119,7 +119,7 @@ class SearchItemTool(Tool):
             raise ValueError("description cannot be empty")
 
     def run(self, **args: Any) -> Any:
-        return self.owner.search_item(**args)
+        return self.owner.mago_mcp.search_item(**args)
 
 
 class StockLevelTool(Tool):
@@ -142,7 +142,7 @@ class StockLevelTool(Tool):
             raise ValueError("item_code cannot be empty")
 
     def run(self, **args: Any) -> Any:
-        return self.owner.item_stock_level(**args)
+        return self.owner.mago_mcp.item_stock_level(**args)
 
 
 class DelegateTool(Tool):
@@ -176,7 +176,7 @@ class DelegateTool(Tool):
     def run(self, **args: Any) -> Any:
         max_steps = args.get("max_steps") or 3
 
-        return self.owner.tool_delegate(
+        return self.owner.mago_mcp.tool_delegate(
             task=args["task"],
             max_steps=max_steps
         )
