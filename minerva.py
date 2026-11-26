@@ -346,6 +346,7 @@ class MinervaAgent:
             "history": [],
             "memory": {"task": "", "notes": []},
         }
+        self.memory_length = 10
         self.mago_mcp = MagoMCP()
         self.tools = build_tools(self)
         self.tools_definition = [
@@ -404,38 +405,16 @@ class MinervaAgent:
     #####################################################
     #### 4) Context Reduction And Output Management #####
     #####################################################
-    def history_messages(self):
-        history = self.session["history"]
-        if not history:
-            return []
-        
-        exclude = {"created_at", "thinking"}
-
-        return [
-            {k: v for k, v in item.items() if k not in exclude}
-            for item in history
-        ]
 
     ########################################################
     #### 2) Prompt Shape And Cache Reuse (Continued) #######
     ########################################################
-    def build_user_message(
-        self,
-        user_input: str,
-        memory: str | None = None
-    ) -> dict:
+    def build_user_message(self,user_input):
+
+        memory = self.memory_text()
 
         if memory:
-            content = f"""
-            <cached_context>
-            {memory}
-            </cached_context>
-
-            <user_request>
-            {user_input}
-            </user_request>
-            """.strip()
-
+            content = f"<cached_context>{memory}</cached_context><user_request>{user_input}</user_request>".strip()
         else:
             content = user_input
 
@@ -444,7 +423,7 @@ class MinervaAgent:
             "content": content
         }
 
-    def build_messages(self, user_input = None):
+    def build_messages(self, user_input):
         messages = [
             {
                 "role" : "system",
@@ -452,17 +431,9 @@ class MinervaAgent:
             }
         ]
 
-        messages.extend(self.history_messages())
+        user_message = self.build_user_message(user_input)
 
-        if user_input:
-            user_message = self.build_user_message(
-                user_input,
-                self.memory_text()
-            )
-    
-            messages.append(user_message)
-
-            self.record(user_message | {"created_at": now()})
+        self.record(user_message | {"created_at": now()}, messages)
 
         return messages
 
@@ -474,12 +445,14 @@ class MinervaAgent:
     ###############################################
     #### 5) Session Memory (Continued) ###########
     ###############################################
-    def record(self, item):
+    def record(self, item, messages):
         self.session["history"].append(item)
+        messages.append({k: v for k, v in item.items() if k not in {"created_at", "thinking"}})
+        self.store_memory(item)
+
         self.session_path = self.session_store.save(self.session)
 
-    def note_tool(self, name, args, result):
-        memory = self.session["memory"]
+    def tool_note(self, name, args, result):
         # TODO tool results where truncated: it make sense for file content, but not really for ERP queries
         # however, a stategy for dealing with big batches of returned data should be found
         argss = ", ".join(f"{k}={v!r}" for k, v in args.items())
@@ -488,19 +461,59 @@ class MinervaAgent:
             results = ", ".join(f"{k}: {v!r}" for k, v in res.items())
         else:
             results = result;
-        note = f"{name}({argss})={{{results}}}"
-        self.remember(memory["notes"], note, 5)
+        return f"[tool] {name}({argss})={{{results}}}"
 
-    def ask(self, user_input):
-        memory = self.session["memory"]
+    def assistant_note(self, content, tool_calls):
+        if content:
+            return f"[assistant] {content}"
+        elif tool_calls:
+            names = ", ".join(
+                tool_call["function"]["name"]
+                for tool_call in tool_calls
+            )
+            return f"[assistant] requested tool execution: {names}"
+        return ""
 
+    def user_note(self, content):
+        match = re.search(
+            r"<user_request>(.*?)</user_request>",
+            content,
+            re.DOTALL
+        )
+        return f"[user] {match.group(1).strip() if match else content.strip()}"
+
+    def store_memory(self, item):
+        if not item:
+            return
+
+        note = ""
+
+        if item["role"] == "tool":
+            note = self.tool_note(item.get("name"), item.get("args"), item.get("content"))
+        elif item["role"] == "assistant":
+            note = self.assistant_note(item.get("content"), item.get("tool_calls"))
+        elif item["role"] == "user":
+            note = self.user_note(item.get("content"))
+        if not note:
+            return
+
+        notes = self.session["memory"]["notes"]
+        
+        if note in notes:
+            notes.remove(note)
+        notes.append(note)
+
+        del notes[:-self.memory_length]
+
+    def request(self, user_input):
         tool_steps = 0
         attempts = 0
         max_attempts = max(self.max_steps * 3, self.max_steps + 4)
 
+        messages = self.build_messages(user_input)
+
         while attempts < max_attempts:
             attempts += 1
-            messages = self.build_messages(user_input if attempts <= 1 else None)
             self.log(attempts, messages)
             raw, thinking, tool_calls = self.model_client.complete(
                 messages = messages, 
@@ -518,7 +531,8 @@ class MinervaAgent:
                         "tool_calls": tool_calls,
                         "created_at": now(),
                         "thinking": thinking,
-                    }
+                    },
+                    messages
                 )
 
                 for tool_call in tool_calls:
@@ -604,9 +618,9 @@ class MinervaAgent:
                             "args": args,
                             "content": result_content,
                             "created_at": now(),
-                        }
+                        },
+                        messages
                     )
-                self.note_tool(name, args, result)
                 # The next iteration will rebuild the prompt including:
                 # 1. the assistant message with tool_calls;
                 # 2. one role=tool message for each result.
@@ -624,20 +638,20 @@ class MinervaAgent:
                         ),
                         "created_at": now(),
                         "thinking": thinking,
-                    }
+                    },
+                    messages
                 )
                 continue
 
-            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
-            self.remember(memory["notes"], clip(final, 220), 5)
+            self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking}, messages)
             self.log(attempts, messages)
             return final
 
         final = "Stopped after too many malformed model responses without a valid tool call or final answer."
         
-        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
-        
+        self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking}, messages)
         self.log(attempts, messages)
+
         return final
 
     #############################################################
@@ -697,10 +711,11 @@ class MinervaAgent:
             max_depth=self.max_depth,
             read_only=True,
         )
-        # TODO this is wrong, task must come from input
-        child.session["memory"]["task"] = task
-        child.session["memory"]["notes"] = [clip(self.history_messages(), 300)]
-        return "delegate_result:\n" + child.ask(task)
+        # TODO rewiew delegate calling
+        # child.session["memory"]["task"] = task
+        # child.session["memory"]["notes"] = [clip(self.history_messages(), 300)]
+        child.session["memory"]["notes"] = self.session["memory"]["notes"]
+        return "delegate_result:\n" + child.request(task)
 
 def build_welcome(agent, model, host):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
@@ -828,7 +843,7 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt))
+                print(agent.request(prompt))
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -865,7 +880,7 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input))
+            print(agent.request(user_input))
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
 
