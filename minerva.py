@@ -14,7 +14,6 @@ from pprint import pprint
 from tools import build_tools
 
 
-DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 HELP_TEXT = "/help, /memory, /session, /thinking, /reset, /exit"
 WELCOME_ART = (
 "            .:;++++++;;:.",
@@ -62,9 +61,9 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434/v1"
 #### Six Agent Components ####
 ##############################
 # 1) User Data Context -> SubscriptionContext
-# 2) Prompt Shape And Cache Reuse -> build_prefix, memory_text, prompt
-# 3) Structured Tools, Validation, And Permissions -> build_tools, run_tool, validate_tool, approve, parse, path, tool_*
-# 4) Context Reduction And Output Management -> clip, history_text
+# 2) Prompt Shape And Cache Reuse -> build_prefix, memory_text, build_messages
+# 3) Structured Tools, Validation, And Permissions -> build_tools, run_tool, tool.validate, approve, tool_*
+# 4) Context Reduction And Output Management -> clip, history_messages
 # 5) Transcripts, Memory, And Resumption -> SessionStore, record, note_tool, ask, reset
 # 6) Delegation And Bounded Subagents -> tool_delegate
 
@@ -138,7 +137,6 @@ class FakeModelClient:
         self.outputs = list(outputs)
         self.prompts = []
 
-    # def complete(self, prompt, tools, max_new_tokens):
     def complete(self, messages, tools, max_new_tokens):
         self.prompts.append(messages)
         if not self.outputs:
@@ -157,7 +155,6 @@ class OpenAPIModelClient:
         self.top_p = top_p
         self.timeout = timeout
 
-    # def complete(self, prompt, max_new_tokens):
     def complete(self, messages, tools, max_new_tokens):
         
         payload = {
@@ -181,10 +178,9 @@ class OpenAPIModelClient:
         try:
             thinking_parts = []
             response_parts = []
-            # mismatched_tool_calls = []
 
-            # Una risposta può contenere più tool call.
-            # In streaming vengono ricostruite usando il campo "index".
+            # A response can contain multiple tool calls.
+            # When streaming, they are reconstructed using the "index" field.
             tool_calls_by_index = {}
 
             with urllib.request.urlopen(
@@ -195,18 +191,18 @@ class OpenAPIModelClient:
                 for raw_line in response:
                     line = raw_line.decode("utf-8").strip()
 
-                    # Nello stream SSE possono esserci righe vuote
+                    # The SSE stream may contain empty lines.
                     if not line:
                         continue
 
-                    # OpenAI usa Server-Sent Events:
-                    # data: {...}
+                    # OpenAI uses Server-Sent Events:
+                    # data: {...}   
                     if not line.startswith("data:"):
                         continue
 
                     payload_text = line[len("data:"):].strip()
 
-                    # Termine dello stream OpenAI-compatible
+                    # End of the OpenAI-compatible stream.
                     if payload_text == "[DONE]":
                         break
 
@@ -230,20 +226,20 @@ class OpenAPIModelClient:
                     choices = data.get("choices", [])
 
                     if not choices:
-                        # Alcuni eventi possono contenere soltanto metadati
-                        # o informazioni sull'utilizzo dei token.
+                        # Some events may contain only metadata
+                        # or token usage information.
                         continue
 
                     delta = choices[0].get("delta", {})
 
-                    # Testo normale della risposta
+                    # Regular response text.
                     content_part = delta.get("content")
 
                     if content_part:
                         response_parts.append(content_part)
 
-                    # Il campo del reasoning non è completamente standardizzato.
-                    # Questi nomi coprono diversi modelli/provider tramite OpenAPI.
+                    # The reasoning field is not fully standardized.
+                    # These names cover different models/providers via OpenAPI.
                     thinking_part = (
                         delta.get("reasoning_content")
                         or delta.get("reasoning")
@@ -253,8 +249,8 @@ class OpenAPIModelClient:
                     if thinking_part:
                         thinking_parts.append(thinking_part)
 
-                    # Tool call native.
-                    # Ogni chiamata può arrivare suddivisa in più frammenti.
+                    # Native tool call.
+                    # Each call may arrive split into multiple chunks.
                     for tool_call_part in delta.get("tool_calls", []):
 
                         index = tool_call_part.get("index", 0)
@@ -271,7 +267,7 @@ class OpenAPIModelClient:
 
                         tool_call = tool_calls_by_index[index]
                         
-                        # Anche l'id può teoricamente arrivare per frammenti.
+                        # The ID can theoretically arrive in multiple chunks as well.
                         call_id_part = tool_call_part.get("id")
 
                         if call_id_part:
@@ -293,9 +289,6 @@ class OpenAPIModelClient:
 
                         if arguments_part:
                             tool_call["function"]["arguments"] += arguments_part
-
-                    # if tool_call_parts:
-                    #     mismatched_tool_calls.extend(tool_call_parts)
 
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -320,7 +313,6 @@ class OpenAPIModelClient:
             for index in sorted(tool_calls_by_index)
         ]
 
-        # return content, thinking, mismatched_tool_calls
         return content, thinking, tool_calls
 
 class MinervaAgent:
@@ -354,7 +346,6 @@ class MinervaAgent:
             "history": [],
             "memory": {"task": "", "notes": []},
         }
-        # self.tools = self.build_tools()
         self.tools = build_tools(self)
         self.tools_definition = [
             tool.openai_definition()
@@ -386,50 +377,8 @@ class MinervaAgent:
     ###############################################
     #### 3) Structured Tools And Permissions ######
     ###############################################
-#region old code
-    # def build_tools(self):
-    #     tools = {
-    #         "CUSTOMER_INFO": {
-    #             "schema": {"customer_code": "str"},
-    #             "risky": False,
-    #             "description": "Returns: company_name, address, telephone and other company info",
-    #             "run": self.customer_info,
-    #         },
 
-    #         "SEARCH_PEOPLE": {
-    #             "schema": {"name": "str", "last_name": "str"},
-    #             "risky": False,
-    #             "description": "Returns:customer_code or empty result when not found",
-    #             "run": self.search_people,
-    #         },
-    #         "ITEM_INFO": {
-    #             "schema": {"item_code": "str"},
-    #             "risky": False,
-    #             "description": "Returns item information: description, price, etc.",
-    #             "run": self.item_info,
-    #         },
-    #         "SEARCH_ITEM": {
-    #             "schema": {"description": "str"},
-    #             "risky": False,
-    #             "description": "Returns item code or empty result when not found. Wildcards are allowed.",
-    #             "run": self.search_item,
-    #         },
-    #         "STOCK_LEVEL": {
-    #             "schema": {"item_code": "str"},
-    #             "risky": False,
-    #             "description": "Returns the current stock level of the item, and the unit of measure it is expressed: pieces, boxes, etc.",
-    #             "run": self.item_stock_level,
-    #         },
-    #     }
-    #     if self.depth < self.max_depth:
-    #         tools["DELEGATE"] = {
-    #             "schema": {"task": "str", "max_steps": "int=3"},
-    #             "risky": False,
-    #             "description": "Ask a bounded read-only child agent to investigate.",
-    #             "run": self.tool_delegate,
-    #         }
-    #     return tools
-#endregion
+    # see tools.py
 
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
@@ -438,33 +387,14 @@ class MinervaAgent:
         
         rules = Path(base_path(), "assets", "system_prompt.md").read_text(encoding="utf-8")
 
-        # tool_lines = []
-        # for name, tool in self.tools.items():
-        #     fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
-        #     risk = "approval required" if tool["risky"] else "safe"
-        #     tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
-        # tool_text = "\n".join(tool_lines)
-
-        # examples = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
-
         subscription_info = Path(base_path(), "assets", "subscription_info.md").read_text(encoding="utf-8")
 
         return "\n\n".join([
             rules,
-            # "**AVAILABLE SERVICE REQUESTS**:\n" + tool_text,
-            # examples,
             subscription_info
         ])
 
     def memory_text(self):
-        # memory = self.session["memory"]
-        # notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
-        # return "\n".join([
-        #     "Memory:",
-        #     # f"- task: {memory['task'] or '-'}",
-        #     "- notes:",
-        #     notes,
-        # ])
         notes = ""
         if self.session["memory"]:
             notes = self.session["memory"]["notes"]
@@ -473,35 +403,6 @@ class MinervaAgent:
     #####################################################
     #### 4) Context Reduction And Output Management #####
     #####################################################
-    def history_text(self):
-        history = self.session["history"]
-        if not history:
-            return "- empty"
-
-        lines = []
-        seen_reads = set()
-        recent_start = max(0, len(history) - 6)
-        for index, item in enumerate(history):
-            recent = index >= recent_start
-            if item["role"] == "tool" and item["name"] in ("write_file", "patch_file"):
-                path = str(item["args"].get("path", ""))
-                seen_reads.discard(path)
-            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
-                path = str(item["args"].get("path", ""))
-                if path in seen_reads:
-                    continue
-                seen_reads.add(path)
-
-            if item["role"] == "tool":
-                limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
-                lines.append(clip(item["content"], limit))
-            else:
-                limit = 900 if recent else 220
-                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
-
-        return clip("\n".join(lines), MAX_HISTORY)
-
     def history_messages(self):
         history = self.session["history"]
         if not history:
@@ -517,14 +418,6 @@ class MinervaAgent:
     ########################################################
     #### 2) Prompt Shape And Cache Reuse (Continued) #######
     ########################################################
-    def prompt(self, user_message):
-        return "\n\n".join([
-            self.prefix,
-            self.memory_text(),
-            "Transcript:\n" + self.history_text(),
-            "Current user request:\n" + user_message,
-        ])
-
     def build_user_message(
         self,
         user_input: str,
@@ -588,8 +481,6 @@ class MinervaAgent:
         memory = self.session["memory"]
         # TODO tool results where truncated: it make sense for file content, but not really for ERP queries
         # however, a stategy for dealing with big batches of returned data should be found
-        # note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
-        # note = f"{name}: {clip(str(result).replace(chr(10), ' '))}"
         argss = ", ".join(f"{k}={v!r}" for k, v in args.items())
         res = json.loads(result)
         if isinstance(res, dict):
@@ -601,51 +492,24 @@ class MinervaAgent:
 
     def ask(self, user_input):
         memory = self.session["memory"]
-        # if not memory["task"]:
-        #     memory["task"] = clip(user_input.strip(), 300)
-        # self.record({"role": "user", "content": user_input, "created_at": now()})
 
         tool_steps = 0
         attempts = 0
         max_attempts = max(self.max_steps * 3, self.max_steps + 4)
 
-        # while tool_steps < self.max_steps and attempts < max_attempts:
         while attempts < max_attempts:
             attempts += 1
-            # prompt = self.prompt(user_message)
             messages = self.build_messages(user_input if attempts <= 1 else None)
-            # self.log(attempts, prompt)
             self.log(attempts, messages)
-            # raw, thinking, tool_calls = self.model_client.complete(prompt, self.max_new_tokens)
             raw, thinking, tool_calls = self.model_client.complete(
                 messages = messages, 
                 tools = self.tools_definition,
                 max_new_tokens = self.max_new_tokens
             )
-#region old
-            # kind, payload = self.parse(raw)
-
-            # if kind == "tool":
-            #     tool_steps += 1
-            #     name = payload.get("name", "")
-            #     args = payload.get("args", {})
-            #     result = self.run_tool(name, args)
-            #     self.record(
-            #         {
-            #             "role": "tool",
-            #             "name": name,
-            #             "args": args,
-            #             "content": result,
-            #             "created_at": now(),
-            #             "thinking" : thinking,
-            #             "mismatched_tools": mismatched_tools
-            #         }
-            #     )
-#endregion
 
             if tool_calls:
-                # È indispensabile conservare anche il messaggio assistant
-                # che contiene le richieste dei tool.
+                # It is essential to also preserve the assistant message
+                # containing the tool calls.
                 self.record(
                     {
                         "role": "assistant",
@@ -696,19 +560,20 @@ class MinervaAgent:
                             tool_steps += 1
 
                             try:
+                                # TODO manage the repeated tool calls
                                 result = self.run_tool(name, args)
 
                             except ValueError as exc:
-                                # Errore previsto e utile al modello:
-                                # validazione semantica o argomento non accettabile.
+                                # Expected error that is useful to the model:
+                                # semantic validation failure or unacceptable argument.
                                 result = {
                                     "success": False,
                                     "error": str(exc),
                                 }
 
                             except Exception as exc:
-                                # Registrare internamente il dettaglio tecnico,
-                                # senza esporlo integralmente al modello.
+                                # Log the technical details internally,
+                                # without exposing them in full to the model.
                                 # self.log_tool_error(
                                 #     name=name,
                                 #     args=args,
@@ -720,7 +585,7 @@ class MinervaAgent:
                                     "error": "Internal tool execution error",
                                 }
 
-                    # Il content del messaggio tool deve essere una stringa.
+                    # The content of the tool message must be a string.
                     if isinstance(result, str):
                         result_content = result
                     else:
@@ -741,20 +606,15 @@ class MinervaAgent:
                         }
                     )
                 self.note_tool(name, args, result)
-                # La prossima iterazione ricostruirà il prompt includendo:
-                # 1. il messaggio assistant con tool_calls;
-                # 2. un messaggio role=tool per ogni risultato.
+                # The next iteration will rebuild the prompt including:
+                # 1. the assistant message with tool_calls;
+                # 2. one role=tool message for each result.
                 continue
 
-            # if kind == "retry":
-            #     self.record({"role": "assistant", "content": payload, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
-            #     continue
-
-            # final = (payload or raw).strip()
             final = (raw or "").strip()
 
             if not final:
-                # Risposta anomala: nessun testo e nessuna tool call.
+                # Abnormal response: no text and no tool calls.
                 self.record(
                     {
                         "role": "assistant",
@@ -767,7 +627,6 @@ class MinervaAgent:
                 )
                 continue
 
-            # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
             self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
             self.remember(memory["notes"], clip(final, 220), 5)
             self.log(attempts, messages)
@@ -775,7 +634,6 @@ class MinervaAgent:
 
         final = "Stopped after too many malformed model responses without a valid tool call or final answer."
         
-        # self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking, "mismatched_tools": mismatched_tools})
         self.record({"role": "assistant", "content": final, "created_at": now(), "thinking" : thinking})
         
         self.log(attempts, messages)
@@ -789,44 +647,16 @@ class MinervaAgent:
 
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
+        # TODO record the invocation of non-existing tools
+        # mismatched_tool_calls.extend(tool_call_parts)
+        # mismatched_tool_calls = []
 
         tool.validate(args)
 
+        if tool.risky and not self.approve(name, args):
+            raise ValueError(f"error: approval denied for {name}")
+
         return tool.run(**args)
-
-#region old code    
-    # def run_tool(self, name, args):
-    #     tool = self.tools.get(name)
-    #     if tool is None:
-    #         return f"error: unknown tool '{name}'"
-    #     try:
-    #         self.validate_tool(name, args)
-    #     except Exception as exc:
-    #         example = Path(base_path(), "assets", "additional_info.md").read_text(encoding="utf-8")
-    #         message = f"error: invalid arguments for {name}: {exc}"
-    #         if example:
-    #             message += f"\nexample: {example}"
-    #         return message
-    #     if self.repeated_tool_call(name, args):
-    #         return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-    #     if tool["risky"] and not self.approve(name, args):
-    #         return f"error: approval denied for {name}"
-    #     try:
-    #         return clip(tool["run"](args))
-    #     except Exception as exc:
-    #         return f"error: tool {name} failed: {exc}"
-#endregion
-
-    def repeated_tool_call(self, name, args):
-        tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
-        if len(tool_events) < 2:
-            return False
-        recent = tool_events[-2:]
-        return all(item["name"] == name and item["args"] == args for item in recent)
-
-    def validate_tool(self, name, args):
-        args = args or {}
-        # TODO implement the right validation for the new tooling
 
     def approve(self, name, args):
         if self.read_only:
@@ -840,109 +670,6 @@ class MinervaAgent:
         except EOFError:
             return False
         return answer.strip().lower() in {"y", "yes"}
-
-#region old code
-    # @staticmethod
-    # def parse(raw):
-    #     raw = str(raw)
-    #     if "<service>" in raw and ("<final>" not in raw or raw.find("<service>") < raw.find("<final>")):
-    #         body = MinervaAgent.extract(raw, "service")
-    #         try:
-    #             payload = json.loads(body)
-    #         except Exception:
-    #             return "retry", MinervaAgent.retry_notice("model returned malformed service JSON")
-    #         if not isinstance(payload, dict):
-    #             return "retry", MinervaAgent.retry_notice("service payload must be a JSON object")
-    #         if not str(payload.get("name", "")).strip():
-    #             return "retry", MinervaAgent.retry_notice("service payload is missing a service name")
-    #         args = payload.get("args", {})
-    #         if args is None:
-    #             payload["args"] = {}
-    #         elif not isinstance(args, dict):
-    #             return "retry", MinervaAgent.retry_notice()
-    #         return "tool", payload
-    #     if "<service" in raw and ("<final>" not in raw or raw.find("<service") < raw.find("<final>")):
-    #         payload = MinervaAgent.parse_xml_tool(raw)
-    #         if payload is not None:
-    #             return "service", payload
-    #         return "retry", MinervaAgent.retry_notice()
-    #     if "<final>" in raw:
-    #         final = MinervaAgent.extract(raw, "final").strip()
-    #         if final:
-    #             return "final", final
-    #         return "retry", MinervaAgent.retry_notice("model returned an empty <final> answer")
-    #     raw = raw.strip()
-    #     if raw:
-    #         return "final", raw
-    #     return "retry", MinervaAgent.retry_notice("model returned an empty response")
-
-    # @staticmethod
-    # def retry_notice(problem=None):
-    #     prefix = "Runtime notice"
-    #     if problem:
-    #         prefix += f": {problem}"
-    #     else:
-    #         prefix += ": model returned malformed service output"
-    #     return (
-    #         f"{prefix}. Reply with a valid <service> call or a non-empty <final> answer."
-    #     )
-
-    # @staticmethod
-    # def parse_xml_tool(raw):
-    #     match = re.search(r"<service(?P<attrs>[^>]*)>(?P<body>.*?)</service>", raw, re.S)
-    #     if not match:
-    #         return None
-    #     attrs = MinervaAgent.parse_attrs(match.group("attrs"))
-    #     name = str(attrs.pop("name", "")).strip()
-    #     if not name:
-    #         return None
-
-    #     body = match.group("body")
-    #     args = dict(attrs)
-    #     for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
-    #         if f"<{key}>" in body:
-    #             args[key] = MinervaAgent.extract_raw(body, key)
-
-    #     body_text = body.strip("\n")
-    #     if name == "write_file" and "content" not in args and body_text:
-    #         args["content"] = body_text
-    #     if name == "delegate" and "task" not in args and body_text:
-    #         args["task"] = body_text.strip()
-    #     return {"name": name, "args": args}
-
-    # @staticmethod
-    # def parse_attrs(text):
-    #     attrs = {}
-    #     for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
-    #         attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
-    #     return attrs
-
-    # @staticmethod
-    # def extract(text, tag):
-    #     start_tag = f"<{tag}>"
-    #     end_tag = f"</{tag}>"
-    #     start = text.find(start_tag)
-    #     if start == -1:
-    #         return text
-    #     start += len(start_tag)
-    #     end = text.find(end_tag, start)
-    #     if end == -1:
-    #         return text[start:].strip()
-    #     return text[start:end].strip()
-
-    # @staticmethod
-    # def extract_raw(text, tag):
-    #     start_tag = f"<{tag}>"
-    #     end_tag = f"</{tag}>"
-    #     start = text.find(start_tag)
-    #     if start == -1:
-    #         return text
-    #     start += len(start_tag)
-    #     end = text.find(end_tag, start)
-    #     if end == -1:
-    #         return text[start:]
-    #     return text[start:end]
-#endregion
 
     def reset(self):
         self.session["history"] = []
@@ -999,7 +726,6 @@ class MinervaAgent:
         )
         # TODO this is wrong, task must come from input
         child.session["memory"]["task"] = task
-        # child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
         child.session["memory"]["notes"] = [clip(self.history_messages(), 300)]
         return "delegate_result:\n" + child.ask(task)
 
